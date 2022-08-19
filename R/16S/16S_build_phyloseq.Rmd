@@ -1,0 +1,31 @@
+---
+title: "16S Build Phyloseq"
+output: html_document
+date: '2022-08-19'
+---
+
+```{r 16S_run_qc}
+sequencing_run_qc = read_tsv(
+  '/home/mmcarter/user_data/Projects/RAMP/16S/Sonnenburg_Project_005_Merged/Analysis/illumina-basicQC/metrics.txt'
+  ) %>%
+  filter(!grepl('BLANK', `general-samplename`)) %>%
+  filter(!grepl('Mean', `general-samplename`)) %>%
+  mutate(SampleID = paste0('S', `general-samplename`))
+
+samples_above_4k = sequencing_run_qc %>%
+  filter(`subsample-rawreads` >= 4000) %>%
+  separate(SampleID, into=c('SampleID', 'Well'), sep='[.]', remove=T) %>%
+  pull(SampleID)
+
+sequencing_run_qc %>%
+  summarise(mean(`subsample-rawreads`),
+            sd(`subsample-rawreads`))
+
+ggplot(sequencing_run_qc, aes(x=`general-projectname`, y=`subsample-rawreads`)) +
+  geom_violin(draw_quantiles = c(0.5)) +
+  theme_bw() +
+  theme(panel.grid = element_blank()) +
+  xlab('') +
+  ylab('Raw reads')
+
+```
