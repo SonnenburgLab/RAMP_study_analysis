@@ -304,6 +304,8 @@ ramp_ps_trim_genus_glom = ramp_ps_trim %>% tax_glom("Genus")
 ramp_ps_trim_species_glom = ramp_ps_trim %>% tax_glom("Species")
 
 # tax_table(ramp_ps_trim_genus_glom)
+
+saveRDS(ramp_ps_trim_genus_glom, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/phyloseq_object_trimmed_genus_glom.rds')
 ```
 
 ```{r maaslin}
@@ -311,6 +313,8 @@ ramp_ps_trim_species_glom = ramp_ps_trim %>% tax_glom("Species")
 # Subset phyloseq object to Week 0 baseline and two intervention timepoints
 ps_maaslin = subset_samples(ramp_ps_trim_genus_glom, (timepoint == 2 | timepoint == 3 | timepoint == 4))
 tax_table(ps_maaslin)
+
+saveRDS(ps_maaslin, file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/phyloseq_object_for_maaslin.rds')
 
 # Recode timepoint variable as continuous variable
 df_input_metadata = data.frame(sample_data(ps_maaslin)) %>%
