@@ -1,0 +1,72 @@
+---
+title: "RAMP 2FL Quantification"
+output: html_document
+date: '2022-08-23'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+```{r metabolon_results}
+metabolon_results = read_csv(file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/2FL_QUANT/2FL_QUANT_metabolon_results.csv') %>%
+  mutate(Result = ifelse(Result == 'N/Q', '0', Result)) %>%
+  mutate(Result = as.numeric(Result)) %>%
+  mutate(Result = ifelse(Result < LLOQ, LLOQ, Result)) %>%
+  rename(participant_id = `Client Sample ID`) %>%
+  mutate(participant_id = factor(participant_id)) %>%
+  left_join(ramp_metadata_df, by='participant_id')
+
+dummy_data = dummy <- data.frame(final_grp=c('Placebo', 'Placebo'), Result=c(0.33, 25), Matrix = c('EDTA plasma', 'Urine'), stringsAsFactors=FALSE)
+
+metabolon_color_plot = ggplot(metabolon_results, aes(x=final_grp, y=Result)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(aes(color=final_grp), size=2) +
+  geom_blank(data = dummy_data) +
+  scale_color_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  facet_wrap(~Matrix, scales='free_y') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  xlab('Treatment Group') +
+  ylab('2FL Concentration (ug/mL)') +
+  guides(color=FALSE, fill=FALSE)
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/2FL_QUANT_metabolon_boxplot.pdf',
+       plot = metabolon_color_plot,
+       width=5, height=3, units=c('in'))
+
+metabolon_results_wide = metabolon_results %>%
+  select(participant_id, Matrix, Result, final_grp) %>%
+  group_by(participant_id) %>%
+  spread(key=Matrix, value=Result)
+
+# Percentage of each treatment group where 2FL is detected
+metabolon_results_wide %>%
+  ungroup() %>%
+  group_by(final_grp) %>%
+  summarise(percent_edta_plasma = sum(`EDTA plasma` > 0.02) / n())
+
+metabolon_results_wide %>%
+  ungroup() %>%
+  group_by(final_grp) %>%
+  filter(!is.na(Urine)) %>%
+  summarise(percent_urine = sum(Urine > 0.2, na.rm=T) / n())
+
+# EDTA plasma tests
+t.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% pull(`EDTA plasma`),
+       metabolon_results_wide %>% filter(final_grp == 'Placebo') %>% pull(`EDTA plasma`))
+t.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% pull(`EDTA plasma`),
+       metabolon_results_wide %>% filter(final_grp == 'High Dose 2FL') %>% pull(`EDTA plasma`))
+t.test(metabolon_results_wide %>% filter(final_grp == 'Placebo') %>% pull(`EDTA plasma`),
+       metabolon_results_wide %>% filter(final_grp == 'High Dose 2FL') %>% pull(`EDTA plasma`))
+
+# Urine tests
+t.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine),
+       metabolon_results_wide %>% filter(final_grp == 'Placebo') %>% filter(!is.na(Urine)) %>% pull(Urine))
+t.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine),
+       metabolon_results_wide %>% filter(final_grp == 'High Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine))
+t.test(metabolon_results_wide %>% filter(final_grp == 'Placebo') %>% filter(!is.na(Urine)) %>% pull(Urine),
+       metabolon_results_wide %>% filter(final_grp == 'High Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine))
+```
