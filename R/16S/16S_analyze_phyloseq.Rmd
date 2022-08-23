@@ -376,12 +376,12 @@ ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/pl
 
 wilcox_list = c()
 for (i in 1:5) {
-  x1 = wilcox.test(taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'Placebo') %>% pull(Observed),
-       taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'High Dose 2FL') %>% pull(Observed))
-  x2 = wilcox.test(taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'Low Dose 2FL') %>% pull(Observed),
-       taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'High Dose 2FL') %>% pull(Observed))
-  x3 = wilcox.test(taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'Low Dose 2FL') %>% pull(Observed),
-       taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'Placebo') %>% pull(Observed))
+  x1 = wilcox.test(taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'Placebo') %>% pull(OTU_abund),
+       taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'High Dose 2FL') %>% pull(OTU_abund))
+  x2 = wilcox.test(taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'Low Dose 2FL') %>% pull(OTU_abund),
+       taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'High Dose 2FL') %>% pull(OTU_abund))
+  x3 = wilcox.test(taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'Low Dose 2FL') %>% pull(OTU_abund),
+       taxa_of_interest %>% filter(timepoint == i) %>% filter(final_grp == 'Placebo') %>% pull(OTU_abund))
   
   wilcox_list = c(wilcox_list, x1$p.value, x2$p.value, x3$p.value)
 }
@@ -419,7 +419,7 @@ wilcox.test(taxa_of_interest %>% filter(treatment_grp == '91') %>% filter(timepo
 ```
 
 ```{r metabolon_results}
-metabolon_results = read_csv(file = '/home/mmcarter/user_data/scripts/210512_ramp_metabolon_results/210512_metabolon_2fl_results.csv') %>%
+metabolon_results = read_csv(file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/2FL_QUANT/2FL_QUANT_metabolon_results.csv') %>%
   mutate(Result = ifelse(Result == 'N/Q', '0', Result)) %>%
   mutate(Result = as.numeric(Result)) %>%
   mutate(Result = ifelse(Result < LLOQ, LLOQ, Result)) %>%
@@ -455,6 +455,8 @@ bifido_responders = bifido_delta_df %>%
   full_join(metabolon_results) %>%
   filter(!is.na(responder_status_delta))
 
+write.csv(bifido_responders, file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/16S_bifido_responder_status.csv', quote = F, row.names = F)
+
 wilcox.test(bifido_responders %>% filter(final_grp == 'Placebo') %>% pull(delta_2_3),
             bifido_responders %>% filter(final_grp == 'High Dose 2FL') %>% pull(delta_2_3), na.rm = T)
 
@@ -485,7 +487,7 @@ bifido_responder_at_baseline = ggplot(bifido_responders, aes(x=responder_status_
   theme_bw() +
   theme(panel.grid.major = element_blank(),
         panel.grid.minor = element_blank()) +
-  xlab('Treatment Group') + 
+  xlab('Responder Status') + 
   ylab('Bifidobacterium abundance at baseline') +
   scale_fill_manual(values=c('#d75e65', '#5e65d7')) +
   scale_y_continuous(limits=c(0, 0.32), breaks=c(0, 0.1, 0.2, 0.3), labels=c('0', '10', '20', '30')) +
@@ -496,15 +498,19 @@ ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/pl
 wilcox.test(bifido_responders %>% filter(responder_status_delta == 'responder') %>% pull(bifido_abund_2),
             bifido_responders %>% filter(responder_status_delta == 'nonresponder') %>% pull(bifido_abund_2))
 
-ggplot(bifido_responders, aes(x=responder_status_delta, y=EDTA_plasma, fill=responder_status_delta)) +
+bifido_responder_plasma_levels = ggplot(bifido_responders, aes(x=responder_status_delta, y=EDTA_plasma, fill=responder_status_delta)) +
+  geom_hline(yintercept=0.02, linetype='dashed') +
   geom_boxplot(draw_quantiles = c(0.5)) +
   theme_bw() +
   theme(panel.grid.major = element_blank(),
         panel.grid.minor = element_blank()) +
-  xlab('Treatment Group') +
-  ylab('Change in Bifidobacterium abundance\nfrom Week 0 to Week 3 (%)') +
+  xlab('Responder Status') +
+  ylab('Plasma 2FL concentration (ug/mL)') +
   scale_fill_manual(values=c('#d75e65', '#5e65d7')) +
-  guides(fill=FALSE) 
+  guides(fill=FALSE) +
+  ylim(0, 0.35)
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifido_responder_plasma_levels.pdf', plot = bifido_responder_plasma_levels, units=c('in'), width=4, height=3.5)
 ```
 
 
