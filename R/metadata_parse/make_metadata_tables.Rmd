@@ -1,0 +1,68 @@
+---
+title: "RAMP Build Metadata File"
+output: html_document
+date: '2022-08-19'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+```
+
+
+```{r load_metadata}
+treatment_arm_randomization = read_csv('/home/mmcarter/user_data/Projects/RAMP/METADATA/RAMP_Randomization_RawData.csv') %>%
+  select(record_id, treatment_grp) %>%
+  rename(participant_id = 1) %>%
+  filter(!is.na(treatment_grp)) %>%
+  mutate(participant_id = as.factor(participant_id),
+         treatment_grp = factor(treatment_grp, levels=c('91', '92', '93')),
+         final_grp = case_when(
+           treatment_grp == '91' ~ 'Low Dose 2FL',
+           treatment_grp == '92' ~ 'Placebo',
+           treatment_grp == '93' ~ 'High Dose 2FL'
+         ),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+demographic_metadata = read_csv('/home/mmcarter/user_data/Projects/RAMP/METADATA/RAMP_Demographics_RawDATA.csv') %>%
+  rename(participant_id = record_id,
+         age = scr_age,
+         gender = scr_gender) %>%
+  mutate(gender = ifelse(gender == 1, 'Male', 'Female'),
+         participant_id = as.factor(participant_id)) %>%
+  select(participant_id, age, gender)
+
+biobank_to_ppid = read_csv('/home/mmcarter/user_data/Projects/RAMP/METADATA/RAMP_biobank_to_ppid.csv') %>%
+  rename(biobank_id = 1,
+         participant_id = 2) %>%
+  mutate(participant_id = factor(participant_id)) %>%
+  select(participant_id, biobank_id)
+
+# PARTICIPANT METADATA TABLE
+ramp_metadata_df = left_join(treatment_arm_randomization, demographic_metadata) %>%
+  left_join(biobank_to_ppid)
+
+# WRITE PARTICIPANT METADATA TABLE
+write.csv(ramp_metadata_df, file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv',
+          quote = F, sep = ',', row.names = F)
+
+
+stool_manifest = read_csv('/home/mmcarter/user_data/Projects/RAMP/METAGENOMICS/220113_stool_manifest.csv') %>% 
+  rename(participant_id = 1,
+         visit_date = 2,
+         scfa_index = 6) %>%
+  select(participant_id, visit_date, stool_count, scfa_index, `MGX Plate`) %>%
+  rowwise() %>%
+  mutate(participant_id = factor(participant_id),
+         visit_date = mdy(visit_date)) %>%
+  left_join(treatment_arm_randomization, by='participant_id') %>%
+  # Removing the following two samples due to sample collection errors
+  filter(scfa_index != 141 & scfa_index != 303)
+
+# WRITE STOOL METADATA TABLE
+write.csv(stool_manifest, file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_stool_metadata.csv',
+          quote = F, sep = ',', row.names = F)
+```
+
+
