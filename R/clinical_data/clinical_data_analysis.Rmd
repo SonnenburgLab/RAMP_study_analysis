@@ -1,0 +1,202 @@
+---
+title: "RAMP Clinical Data"
+output: html_document
+date: '2022-08-23'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Maaslin2)
+```
+
+```{r load_metadata}
+ramp_metadata_df = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv') %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+```
+
+
+```{r clinical_panel_load_data}
+dat.lip = read.csv("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/CLINICAL_DATA/RAMP_Lipids_RawDATA.csv",header = T) %>%
+  select(2:8) %>%
+  select(-blood_glucose)
+dat.glu = read.csv("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/CLINICAL_DATA/RAMP_Glucose_RawDATA.csv",header = T)
+dat.ins = read.csv("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/CLINICAL_DATA/RAMP_Insulin_RawDATA.csv",header = T) %>%
+  select(2:4)
+
+ramp_clinical_data = left_join(dat.lip, dat.glu, by=c('record_id', 'redcap_event_name')) %>%
+  left_join(dat.ins, by=c('record_id', 'redcap_event_name')) %>%
+  rename(participant_id = record_id) %>%
+  mutate(participant_id = factor(participant_id)) %>%
+  left_join(ramp_metadata_df, by='participant_id') %>%
+  filter(!is.na(final_grp)) %>%
+  filter(redcap_event_name != 'baseline_2b_arm_1') %>%
+  mutate(redcap_event_name = factor(redcap_event_name, levels=c('baseline_2_arm_1', 'baseline_arm_1', 'week_3_arm_1', 'week_6_arm_1', 'week_10_arm_1')))
+
+```
+
+```{r clinical_panel_analysis}
+perc_change = function(column, grp) {
+  data_df = ramp_clinical_data %>% 
+    filter(final_grp == grp) %>%
+    select(participant_id, redcap_event_name, column) %>%
+    rename(value = 3) %>%
+    spread(key='redcap_event_name', value='value') %>%
+    select(participant_id, baseline_arm_1, week_6_arm_1) %>%
+    rowwise() %>%
+    mutate(perc_change = (week_6_arm_1 - baseline_arm_1) / baseline_arm_1)
+  
+  average = mean(data_df$perc_change,na.rm = T)
+  num = sum(is.na(data_df$perc_change)==F)
+  std_dev = sd(data_df$perc_change, na.rm = T)
+  ss = sqrt(num)
+  error = qnorm(0.975) * std_dev / ss
+  
+  high = average + error
+  low = average - error
+  
+  d = data.frame(variable = column, arm = grp, n = num, average_change = average, high = high, low = low, error = error)
+  return(d)
+}
+
+
+vars = c('hdl_cholesterol', 'calculated_ldl_chol', 'blood_glucose', 'triglycerides', 'total_cholesterol', 'insulin')
+arms = c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')
+
+ramp_clinical_perc_change_result_df = data.frame(variable = character(0), 
+                       arm = character(0), 
+                       n = double(0),
+                       average_change = double(0), 
+                       high = double(0), 
+                       low = double(0),
+                       error = double(0))
+for (v in vars) {
+  for (a in arms) {
+    df = perc_change(v, a)
+    ramp_clinical_perc_change_result_df = rbind(ramp_clinical_perc_change_result_df, df)
+  }
+}
+
+ramp_clinical_change_result_df_for_write = ramp_clinical_perc_change_result_df %>% 
+  mutate(write_string = paste0(round(average_change*100, 1), ' (', round(low*100, 1), ', ', round(high*100, 1), ')')) %>% 
+  mutate(significant = ifelse(sign(high) == sign(low), '*', '')) %>%
+  select(variable, arm, n, write_string, significant)
+
+tree_plot_df = ramp_clinical_perc_change_result_df %>%
+  rename(final_grp = arm) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  mutate(variable = case_when(
+    variable == 'triglycerides' ~ 'Triglycerides',
+    variable == 'total_cholesterol' ~ 'Total Cholesterol',
+    variable == 'insulin' ~ 'Fasting Insulin',
+    variable == 'hdl_cholesterol' ~ 'HDL Cholesterol',
+    variable == 'hdl_fraction' ~ 'Total Chol : HDL Ratio',
+    variable == 'calculated_ldl_chol' ~ 'LDL Cholesterol',
+    variable == 'blood_glucose' ~ 'Blood Glucose',
+  )) %>%
+  mutate(variable = factor(variable, levels=c('Triglycerides', 'Total Cholesterol', 'HDL Cholesterol', 'LDL Cholesterol', 'Fasting Insulin', 'Blood Glucose')))
+
+clinical_panel_tree_plot = ggplot(tree_plot_df, aes(x=variable, y=average_change, color=final_grp)) +
+  geom_point(position = position_dodge(width=0.6) , size=3) +
+  geom_errorbar(aes(ymin=average_change-error, ymax=average_change+error), position = position_dodge(width=0.6) , width=0.0, size=2) +
+  coord_flip() +
+  geom_hline(yintercept=0) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = 'bottom') +
+  scale_color_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  ylab('Percent change (%)') +
+  scale_y_continuous(limits=c(-0.1, 0.42), breaks = c(-0.1, 0, 0.1, 0.2, 0.3, 0.4), labels=c('-10', '0', '10', '20', '30', '40')) 
+
+# ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/CLINICALPANEL/figures/220301_clinical_panel_forest_plot.png', plot = clinical_panel_tree_plot, units = c('in'), width=6, height=4)
+
+```
+```{r load_blood_pressure_data}
+blood_pressure_df = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/CLINICAL_DATA/RAMP_BloodPressure_RawDATA.csv') %>%
+  rename(participant_id = 1,
+         bp_systolic_1 = 3,
+         bp_diastolic_1 = 4,
+         bp_systolic_2 = 5,
+         bp_diastolic_2 = 6,
+         bp_systolic_3 = 7,
+         bp_diastolic_3 = 8,
+         weight_kg = 12,
+         bmi = 14,
+         waist_circ = 15) %>%
+  filter(!is.na(participant_id)) %>%
+  mutate(bp_systolic = (bp_systolic_1 + bp_systolic_2 + bp_systolic_3)/3,
+         bp_diastolic = (bp_diastolic_1 + bp_diastolic_2 + bp_diastolic_3)/3,
+         timepoint = case_when(
+           Visit.ID == 'Visit 1' ~ 1,
+           Visit.ID == 'Visit 2' ~ 2,
+           Visit.ID == 'Visit 3' ~ 3,
+           Visit.ID == 'Visit 4' ~ 4,
+           Visit.ID == 'Visit 5' ~ 5,
+         )) %>%
+  select(participant_id, timepoint, bp_systolic, bp_diastolic, weight_kg, bmi, waist_circ) %>%
+  mutate(participant_id = factor(participant_id),
+         timepoint = as.character(timepoint))
+
+```
+
+```{r maaslin_for_clinical_data}
+ps_maaslin = readRDS('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/phyloseq_object_for_maaslin.rds')
+tax_table(ps_maaslin)
+
+ramp_ps_trim_genus_glom = readRDS('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/phyloseq_object_trimmed_genus_glom.rds')
+
+# Recode timepoint variable as continuous variable
+df_input_metadata = data.frame(sample_data(ps_maaslin)) %>%
+  mutate(final_grp = as.character(final_grp),
+         timepoint = as.character(timepoint),
+         timepoint_text = case_when(
+           timepoint == 1 ~ 'baseline_2_arm_1',
+           timepoint == 2 ~ 'baseline_arm_1',
+           timepoint == 3 ~ 'week_3_arm_1',
+           timepoint == 4 ~ 'week_6_arm_1',
+           timepoint == 5 ~ 'week_10_arm_1'
+         ),
+         grp_time = paste0(final_grp, '_', timepoint),
+         num_time = case_when(
+           timepoint == 1 ~ -2,
+           timepoint == 2 ~ 0,
+           timepoint == 3 ~ 3,
+           timepoint == 4 ~ 6,
+           timepoint == 5 ~ 10
+         )) %>%
+  rownames_to_column(var='SampleID') %>%
+  left_join(ramp_clinical_data, by=c('participant_id'='participant_id','timepoint_text'='redcap_event_name')) %>%
+  left_join(blood_pressure_df, by=c('participant_id','timepoint')) %>%
+  column_to_rownames(var='SampleID')
+
+# Run Maaslin2
+mas_clinical <- Maaslin2(
+  input_data = data.frame(otu_table(ps_maaslin)),
+  input_metadata = df_input_metadata,
+  output = "/home/mmcarter/user_data/Projects/RAMP/CLINICALPANEL/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "CLR",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.2,
+  fixed_effects = c("gender.x", "hdl_cholesterol", "calculated_ldl_chol", "triglycerides", "blood_glucose", "insulin"),
+  random_effects = c("participant_id"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+
+ggplot(mas_clinical$results, aes(x=coef, y=-1*log10(qval), color=metadata)) +
+  geom_point() +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  scale_color_brewer(palette='Dark2') +
+  ylab('Significance (-log(q-value))')
+
+
+```
