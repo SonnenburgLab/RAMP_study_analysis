@@ -1,0 +1,518 @@
+---
+title: "Untitled"
+output: html_document
+date: '2022-11-21'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+
+```{r metadata}
+
+bifido_responders = read_csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/16S_bifido_responder_status.csv') %>%
+  mutate(participant_id = factor(participant_id))
+
+final_participant_list = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_list.csv')
+
+ramp_metadata_df = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv') %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  left_join(bifido_responders) %>%
+  filter(participant_id %in% final_participant_list$participant_id)
+
+sample_map = read.csv(file = '/home/mmcarter/user_data/Projects/RAMP/SCFA/210825_stool_sample_map.csv') %>%
+  mutate(scfa_index = as.character(scfa_index),
+         participant_id = as.character(participant_id))
+
+
+final_participant_timepoint = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_timepoint.csv') 
+
+ramp_metadata_all_timepoints = final_participant_timepoint %>% 
+  rowwise() %>%
+  mutate(participant_id = strsplit(participant_timepoint, '_')[[1]][1],
+         timepoint = strsplit(participant_timepoint, '_')[[1]][2]) %>%
+  left_join(ramp_metadata_df) %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+```
+
+```{r questionnaire_data}
+cog_abilities_results = read_csv('/home/mmcarter/user_data/Projects/RAMP/QUESTIONNAIRES/RAMP_PROMISV10AppliedCognAbilitiesQuestionnaire_RawDATA.csv') %>%
+  rename(participant_id = 1) %>%
+  mutate(participant_id = factor(participant_id)) %>%
+  gather(key='question', value='response', -participant_id, -redcap_event_name) %>%
+  spread(key='redcap_event_name', value='response') %>%
+  rowwise() %>%
+  mutate(baseline_1_arm_1 = case_when(
+    is.na(baseline_1_arm_1) & !is.na(baseline_1b_arm_1) ~ baseline_1b_arm_1,
+    !is.na(baseline_1_arm_1) ~ baseline_1_arm_1
+  )) %>%
+  mutate(week_6_arm_1 = case_when(
+    is.na(week_6_arm_1) & !is.na(week_6b_arm_1) ~ week_6b_arm_1,
+    !is.na(week_6_arm_1) ~ week_6_arm_1
+  )) %>%
+  select(-c(baseline_1b_arm_1, week_6b_arm_1)) %>%
+  na.omit() %>%
+  left_join(ramp_metadata_df) 
+
+cog_genconcerns_results = read_csv('/home/mmcarter/user_data/Projects/RAMP/QUESTIONNAIRES/RAMP_PROMISV10AppliedCognGenConcernsQuestionnaire_RawDATA.csv') %>%
+  rename(participant_id = 1) %>%
+  mutate(participant_id = factor(participant_id)) %>%
+  gather(key='question', value='response', -participant_id, -redcap_event_name) %>%
+  spread(key='redcap_event_name', value='response') %>%
+  rowwise() %>%
+  mutate(baseline_1_arm_1 = case_when(
+    is.na(baseline_1_arm_1) & !is.na(baseline_1b_arm_1) ~ baseline_1b_arm_1,
+    !is.na(baseline_1_arm_1) ~ baseline_1_arm_1
+  )) %>%
+  mutate(week_6_arm_1 = case_when(
+    is.na(week_6_arm_1) & !is.na(week_6b_arm_1) ~ week_6b_arm_1,
+    !is.na(week_6_arm_1) ~ week_6_arm_1
+  )) %>%
+  select(-c(baseline_1b_arm_1, week_6b_arm_1)) %>%
+  na.omit() %>%
+  left_join(ramp_metadata_df) 
+
+gi_symptoms_results = read_csv('/home/mmcarter/user_data/Projects/RAMP/QUESTIONNAIRES/RAMP_GISymptomsQuestionnaire_RawDATA.csv') %>%
+  select(-c(gi16a, gi17, gi23a, gi24a, gi25a, gi24, gi25, gi4, gi21a)) %>%
+  rename(participant_id = 1) %>%
+  mutate(participant_id = factor(participant_id)) %>%
+  gather(key='question', value='response', -participant_id, -redcap_event_name) %>%
+  spread(key='redcap_event_name', value='response') %>%
+  select(-c(baseline_1b_arm_1, week_6b_arm_1)) %>%
+  na.omit() %>%
+  left_join(ramp_metadata_df) 
+
+stress_results = read_csv('/home/mmcarter/user_data/Projects/RAMP/QUESTIONNAIRES/RAMP_PerceivedStressPSS10Questionnaire_RawDATA.csv') %>%
+  rename(participant_id = 1) %>%
+  mutate(participant_id = factor(participant_id)) %>%
+  gather(key='question', value='response', -participant_id, -redcap_event_name) %>%
+  spread(key='redcap_event_name', value='response') %>%
+  select(-c(baseline_1b_arm_1, week_6b_arm_1)) %>%
+  na.omit() %>%
+  left_join(ramp_metadata_df) 
+
+```
+
+
+```{r tscore_conversion}
+
+convert_to_t_score = function(input_score) {
+  if(input_score == 4) {
+    return(30.1)
+  } else if (input_score == 5) {
+    return(34.6)
+  } else if (input_score == 6) {
+    return(36.6)
+  } else if (input_score == 7) {
+    return(38.2)
+  } else if (input_score == 8) {
+    return(39.5)
+  } else if (input_score == 9) {
+    return(40.8)
+  } else if (input_score == 10) {
+    return(42.2)
+  } else if (input_score == 11) {
+    return(43.5)
+  } else if (input_score == 12) {
+    return(44.9)
+  } else if (input_score == 13) {
+    return(46.4)
+  } else if (input_score == 14) {
+    return(48.0)
+  } else if (input_score == 15) {
+    return(49.7)
+  } else if (input_score == 16) {
+    return(51.4)
+  } else if (input_score == 17) {
+    return(53.2)
+  } else if (input_score == 18) {
+    return(55.2)
+  } else if (input_score == 19) {
+    return(57.8)
+  } else if (input_score == 20) {
+    return(63.8)
+  }
+}
+
+
+```
+
+```{r }
+all_questionnaires = rbind(cog_abilities_results, gi_symptoms_results) %>%
+  rbind(cog_genconcerns_results) %>%
+  rbind(stress_results) %>%
+  as.data.frame() 
+
+questions = all_questionnaires %>% pull(question) %>% unique()
+
+questionnaire_anova_fxn = function(q) {
+  print(q)
+  ancova_df = all_questionnaires %>%
+    filter(question == q)
+  if (setequal(ancova_df$baseline_1_arm_1, ancova_df$week_6_arm_1)) {
+    return(1.0)
+  }
+  aov.mod = aov(week_6_arm_1 ~ baseline_1_arm_1 + final_grp, ancova_df)
+  aov_res = Anova(aov.mod, type="III")
+  return(aov_res$`Pr(>F)`[[3]])  
+}
+
+questionnaire_wilcox_fxn = function(q) {
+  print(q)
+  ancova_df = all_questionnaires %>%
+    filter(question == q)
+  w = wilcox.test(ancova_df %>% filter(final_grp == 'High Dose 2FL') %>% pull(week_6_arm_1),
+              ancova_df %>% filter(final_grp == 'High Dose 2FL') %>% pull(baseline_1_arm_1),
+              paired=T)
+  return(w$p.value)  
+}
+
+
+# p_vals = lapply(questions, questionnaire_anova_fxn)
+p_vals = lapply(questions, questionnaire_anova_fxn)
+names(p_vals) = questions 
+
+data.frame(p_vals) %>% 
+  gather(key='question', value='pval') %>%
+  filter(!grepl('complete', question)) %>%
+  mutate(p_adj = p.adjust(pval, method='BH')) %>%
+  arrange(pval)
+
+
+ggplot(all_questionnaires %>% filter(question == 'pr_cog_memory'), aes(x=baseline_1_arm_1, y=week_6_arm_1, color=final_grp)) +
+  geom_point() +
+  stat_smooth(method='lm')
+
+
+cog_memory_plot = ggplot(all_questionnaires_gathered_results %>% filter(question == 'pr_cog_memory'), aes(x=timepoint, y=value, fill=final_grp)) +
+  geom_violin(draw_quantiles=c(0.5)) +
+  scale_x_discrete(labels=c('Baseline', 'End')) +
+  scale_fill_manual(name='Treatment Group', values=c('#939598', '#b4cce1', '#5ea1d7')) + 
+  ylab('Survey Response') +
+  xlab('Timepoint') +
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ggtitle('Normalized cognitive scores')
+
+
+wilcox.test(all_questionnaires_gathered_results %>% filter(treatment_grp == '93' & timepoint == 'week_6_arm_1' & question == 'pr_cog_memory') %>% pull(value),
+            all_questionnaires_gathered_results %>% filter(treatment_grp == '93' & timepoint == 'baseline_1_arm_1' & question == 'pr_cog_memory') %>% pull(value),
+            paired=T)
+```
+
+
+```{r bifido_responders}
+all_questionnaires_results_with_bifido = all_questionnaires %>%
+  left_join(bifido_responders) %>%
+  filter(!is.na(responder_status_delta)) %>%
+  filter(grepl('pr_', question))
+
+
+questionnaire_bifido_anova_fxn = function(q) {
+  print(q)
+  ancova_df = all_questionnaires_results_with_bifido %>%
+    filter(question == q)
+  tryCatch(
+    expr = {
+        aov.mod = aov(week_6_arm_1 ~ baseline_1_arm_1 + responder_status_delta, ancova_df)
+  aov_res = Anova(aov.mod, type="III")
+  return(aov_res$`Pr(>F)`[[3]])  
+    },
+  error = function(e) {
+    return(1)
+  }
+  )
+
+}
+
+
+p_vals = lapply(pr_questions, questionnaire_bifido_anova_fxn)
+names(p_vals) = pr_questions 
+
+data.frame(p_vals) %>% 
+  gather(key='question', value='pval') %>%
+  filter(!grepl('complete', question)) %>%
+  mutate(p_adj = p.adjust(pval, method='fdr')) %>%
+  arrange(pval)
+
+
+pr_cog_agg_score = all_questionnaires_gathered_results_with_bifido %>% 
+  filter(question == 'pr_cog_raw_score') %>% 
+  rowwise() %>% 
+  mutate(t_score = convert_to_t_score(value))
+
+ggplot(pr_cog_agg_score, aes(x=timepoint, y=value, fill=responder_status_delta)) +
+  geom_violin(draw_quantiles=c(0.5)) +
+  scale_x_discrete(labels=c('Baseline', 'End')) +
+  scale_fill_manual(name = 'Responder Status', values=c('#d75e65', '#5e65d7')) +
+  ylab('Survey Response') +
+  xlab('Timepoint') +
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) 
+
+wilcox.test(pr_cog_agg_score %>% filter(responder_status_delta == 'responder') %>% filter(timepoint == 'baseline_1_arm_1') %>% pull(value),
+            pr_cog_agg_score %>% filter(responder_status_delta == 'responder') %>% filter(timepoint == 'week_6_arm_1') %>% pull(value),
+            paired=T)
+
+wilcox.test(pr_cog_agg_score %>% filter(responder_status_delta == 'nonresponder') %>% filter(timepoint == 'baseline_1_arm_1') %>% pull(value),
+            pr_cog_agg_score %>% filter(responder_status_delta == 'responder') %>% filter(timepoint == 'baseline_1_arm_1') %>% pull(value))
+```
+
+
+```{r CANTAB}
+cantab_results = read_csv('/home/mmcarter/user_data/Projects/RAMP/QUESTIONNAIRES/RowBySessionNorms_RAMP-2_phi-free.csv') %>%
+  rename(participant_id = `Participant ID`,
+         timepoint = `Visit Identifier`) %>%
+  rowwise() %>%
+  mutate(participant_id = factor(participant_id),
+    timepoint = ifelse(timepoint == 'Week -1', 'Week 0', timepoint)) %>%
+  select(participant_id, timepoint, c(23:64)) %>%
+  select(-c(PALFAMS28NormsBank, PALTEA28NormsBank, RVPANormsBank, RVPPFANormsBank)) %>%
+  gather(key='test_type', value='result', -participant_id, -timepoint) %>%
+  left_join(ramp_metadata_df) %>%
+  mutate(timepoint = factor(timepoint, levels=c('Week -2', 'Week 0', 'Week 3', 'Week 6', 'Week 10'))) %>%
+  filter(!is.na(final_grp)) %>%
+  filter(!is.na(timepoint)) %>%
+  left_join(bifido_responders) %>%
+  # filter(!is.na(responder_status_delta)) %>%
+  filter(participant_id != '4004') %>%
+  filter(!is.na(result)) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+cantab_results %>% pull(test_type) %>% unique()
+```
+
+
+```{r rvpa}
+cantab_results_filtered = cantab_results %>%
+    filter(test_type == 'RVPAPercentile')
+
+ggplot(cantab_results_filtered %>% filter(timepoint == 'Week 6' | timepoint == 'Week -2'), aes(x=timepoint, y=result, fill=final_grp)) +
+  geom_violin(draw_quantiles=c(0.5)) +
+  geom_point(aes(group=participant_id),size=2, alpha=0.7) +
+  geom_line(aes(group=participant_id), alpha=0.7) +
+  facet_wrap(~final_grp) +
+  ylab('RVPA Percentile Score') +
+  # scale_y_continuous(limits = c(0, 120), breaks=c(0, 25, 50, 75, 100)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  scale_fill_manual(name = 'Treatment Group', values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  xlab('Timepoint')
+
+cantab_baseline_end_spread = cantab_results_filtered %>%
+  filter(timepoint %in% c('Week -2', 'Week 6')) %>%
+  spread(key='timepoint', value='result') %>%
+  rename(post = `Week 6`,
+         pre = `Week -2`) %>%
+  rowwise() %>%
+  mutate(treatment_grp_mod = ifelse(treatment_grp == '92', 'placebo', 'treatment'))
+
+wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '91') %>% pull(pre),
+            cantab_baseline_end_spread %>% filter(treatment_grp == '91') %>% pull(post), paired=TRUE)
+
+wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '92') %>% pull(pre),
+            cantab_baseline_end_spread %>% filter(treatment_grp == '92') %>% pull(post), paired=TRUE)
+
+wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '93') %>% pull(pre),
+            cantab_baseline_end_spread %>% filter(treatment_grp == '93') %>% pull(post), paired=TRUE)
+
+ggplot(cantab_results_filtered, aes(x=timepoint, y=result, fill=responder_status_delta)) +
+  geom_violin(draw_quantiles=c(0.5)) +
+  geom_point(aes(group=participant_id),size=2, alpha=0.7) +
+  geom_line(aes(group=participant_id), alpha=0.7) +
+  facet_wrap(~responder_status_delta) +
+  ylab('RVPA Percentile Score') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  scale_fill_manual(name = 'Responder Status', values=c('#d75e65', '#5e65d7')) +
+  # scale_y_continuous(limits = c(0, 120), breaks=c(0, 25, 50, 75, 100)) +
+  xlab('Timepoint')
+
+
+t.test(cantab_baseline_end_spread %>% filter(responder_status_delta == 'responder') %>% pull(pre),
+            cantab_baseline_end_spread %>% filter(responder_status_delta == 'responder') %>% pull(post), paired=TRUE)
+
+
+t.test(cantab_baseline_end_spread %>% filter(responder_status_delta == 'nonresponder') %>% pull(pre),
+            cantab_baseline_end_spread %>% filter(responder_status_delta == 'nonresponder') %>% pull(post), paired=TRUE)
+
+cantab_baseline_end_spread = cantab_results_filtered %>%
+  filter(timepoint %in% c('Week -2', 'Week 6')) %>%
+  spread(key='timepoint', value='result') %>%
+  rename(post = `Week 6`,
+         pre = `Week -2`) %>%
+  rowwise() %>%
+  mutate(treatment_grp_mod = ifelse(treatment_grp == '92', 'placebo', 'treatment')) %>%
+  mutate(responder_status_delta = recode_factor(responder_status_delta, `responder` = "Responder", `nonresponder` = "Non-responder"))
+
+rvpa_baseline_end_plot_responder = ggplot(cantab_baseline_end_spread %>% filter(!is.na(responder_status_delta)), aes(x=pre, y=post, color=responder_status_delta)) +
+  geom_point() +
+  stat_smooth(method='lm') +
+  geom_abline(slope = 1, intercept=0) +
+  scale_color_manual(name = 'Responder Status', values=c('#5e65d7', '#d75e65')) +
+  xlab('Baseline Percentile Score') +
+  ylab('End Percentile Score') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) 
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/cantab_rvp_responder_ancova.pdf',
+       rvpa_baseline_end_plot_responder,
+       width=5, height=3)
+
+
+rvpa_baseline_end_plot_treatment = ggplot(cantab_baseline_end_spread, aes(x=pre, y=post, color=final_grp)) +
+  geom_point() +
+  stat_smooth(method='lm') +
+  geom_abline(slope = 1, intercept=0) +
+  scale_color_manual(name = 'Treatment Arm', values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  xlab('Baseline Percentile Score') +
+  ylab('End Percentile Score') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) 
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/cantab_rvp_treatment_ancova.pdf',
+       rvpa_baseline_end_plot_treatment,
+       width=5, height=3)
+
+ggplot(cantab_results_filtered, aes(x=timepoint, y=result, fill=responder_status_delta)) +
+  geom_boxplot(draw_quantiles=c(0.5)) 
+
+aov.mod = aov(post ~ pre + final_grp, cantab_baseline_end_spread)
+Anova(aov.mod, type="III")
+
+aov.mod = aov(post ~ pre + responder_status_delta, cantab_baseline_end_spread %>% filter(!is.na(responder_status_delta)))
+Anova(aov.mod, type="III")
+
+
+wilcox.test(cantab_results_filtered %>% filter(timepoint == 'Week -2') %>% filter(responder_status_delta == 'responder') %>% pull(result),
+            cantab_results_filtered %>% filter(timepoint == 'Week -2') %>% filter(responder_status_delta == 'nonresponder') %>% pull(result))
+
+wilcox.test(cantab_results_filtered %>% filter(timepoint == 'Week 6') %>% filter(responder_status_delta == 'responder') %>% pull(result),
+            cantab_results_filtered %>% filter(timepoint == 'Week 6') %>% filter(responder_status_delta == 'nonresponder') %>% pull(result))
+
+```
+
+
+
+```{r pal}
+cantab_results_filtered = cantab_results %>%
+    filter(test_type == 'PALTEA28Percentile')
+
+ggplot(cantab_results_filtered %>% filter(timepoint == 'Week 6' | timepoint == 'Week -2'), aes(x=timepoint, y=result, fill=final_grp)) +
+  geom_violin(draw_quantiles=c(0.5)) +
+  geom_point(aes(group=participant_id),size=2, alpha=0.7) +
+  geom_line(aes(group=participant_id), alpha=0.7) +
+  facet_wrap(~final_grp) +
+  ylab('RVPA Percentile Score') +
+  # scale_y_continuous(limits = c(0, 120), breaks=c(0, 25, 50, 75, 100)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  scale_fill_manual(name = 'Treatment Group', values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  xlab('Timepoint')
+
+cantab_baseline_end_spread = cantab_results_filtered %>%
+  filter(timepoint %in% c('Week -2', 'Week 6')) %>%
+  spread(key='timepoint', value='result') %>%
+  rename(post = `Week 6`,
+         pre = `Week -2`) %>%
+  rowwise() %>%
+  mutate(treatment_grp_mod = ifelse(treatment_grp == '92', 'placebo', 'treatment'))
+
+wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '91') %>% pull(pre),
+            cantab_baseline_end_spread %>% filter(treatment_grp == '91') %>% pull(post), paired=TRUE)
+
+wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '92') %>% pull(pre),
+            cantab_baseline_end_spread %>% filter(treatment_grp == '92') %>% pull(post), paired=TRUE)
+
+wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '93') %>% pull(pre),
+            cantab_baseline_end_spread %>% filter(treatment_grp == '93') %>% pull(post), paired=TRUE)
+
+ggplot(cantab_results_filtered, aes(x=timepoint, y=result, fill=responder_status_delta)) +
+  geom_violin(draw_quantiles=c(0.5)) +
+  geom_point(aes(group=participant_id),size=2, alpha=0.7) +
+  geom_line(aes(group=participant_id), alpha=0.7) +
+  facet_wrap(~responder_status_delta) +
+  ylab('RVPA Percentile Score') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  scale_fill_manual(name = 'Responder Status', values=c('#d75e65', '#5e65d7')) +
+  # scale_y_continuous(limits = c(0, 120), breaks=c(0, 25, 50, 75, 100)) +
+  xlab('Timepoint')
+
+
+t.test(cantab_baseline_end_spread %>% filter(responder_status_delta == 'responder') %>% pull(pre),
+            cantab_baseline_end_spread %>% filter(responder_status_delta == 'responder') %>% pull(post), paired=TRUE)
+
+
+t.test(cantab_baseline_end_spread %>% filter(responder_status_delta == 'nonresponder') %>% pull(pre),
+            cantab_baseline_end_spread %>% filter(responder_status_delta == 'nonresponder') %>% pull(post), paired=TRUE)
+
+cantab_baseline_end_spread = cantab_results_filtered %>%
+  filter(timepoint %in% c('Week -2', 'Week 6')) %>%
+  spread(key='timepoint', value='result') %>%
+  rename(post = `Week 6`,
+         pre = `Week -2`) %>%
+  rowwise() %>%
+  mutate(treatment_grp_mod = ifelse(treatment_grp == '92', 'placebo', 'treatment')) %>%
+  mutate(responder_status_delta = recode_factor(responder_status_delta, `responder` = "Responder", `nonresponder` = "Non-responder"))
+
+pal_baseline_end_plot_responder = ggplot(cantab_baseline_end_spread %>% filter(!is.na(responder_status_delta)), aes(x=pre, y=post, color=responder_status_delta)) +
+  geom_point() +
+  stat_smooth(method='lm') +
+  geom_abline(slope = 1, intercept=0) +
+  scale_color_manual(name = 'Responder Status', values=c('#5e65d7', '#d75e65')) +
+  xlab('Baseline Percentile Score') +
+  ylab('End Percentile Score') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) 
+
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/cantab_pal_responder_ancova.pdf',
+       pal_baseline_end_plot_responder,
+       width=5, height=3)
+
+pal_baseline_end_plot_treatment = ggplot(cantab_baseline_end_spread, aes(x=pre, y=post, color=final_grp)) +
+  geom_point() +
+  stat_smooth(method='lm') +
+  geom_abline(slope = 1, intercept=0) +
+  scale_color_manual(name = 'Treatment Arm', values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  xlab('Baseline Percentile Score') +
+  ylab('End Percentile Score') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) 
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/cantab_pal_treatment_ancova.pdf',
+       pal_baseline_end_plot_treatment,
+       width=5, height=3)
+
+ggplot(cantab_results_filtered, aes(x=timepoint, y=result, fill=final_grp)) +
+  geom_boxplot(draw_quantiles=c(0.5)) 
+
+aov.mod = aov(post ~ pre + final_grp, cantab_baseline_end_spread)
+Anova(aov.mod, type="III")
+
+aov.mod = aov(post ~ pre + responder_status_delta, cantab_baseline_end_spread %>% filter(!is.na(responder_status_delta)))
+Anova(aov.mod, type="III")
+
+wilcox.test(cantab_results_filtered %>% filter(timepoint == 'Week -2') %>% filter(responder_status_delta == 'responder') %>% pull(result),
+            cantab_results_filtered %>% filter(timepoint == 'Week -2') %>% filter(responder_status_delta == 'nonresponder') %>% pull(result))
+
+wilcox.test(cantab_results_filtered %>% filter(timepoint == 'Week 6') %>% filter(responder_status_delta == 'responder') %>% pull(result),
+            cantab_results_filtered %>% filter(timepoint == 'Week 6') %>% filter(responder_status_delta == 'nonresponder') %>% pull(result))
+
+```

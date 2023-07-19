@@ -1,0 +1,457 @@
+---
+title: "RAMP Olink Analysis"
+output: html_document
+date: '2022-08-24'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(impute)
+library(Maaslin2)
+library(ggrepel)
+```
+
+```{r load_metadata}
+bifido_responders = read_csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/16S_bifido_responder_status.csv') %>%
+  mutate(participant_id = factor(participant_id))
+
+final_participant_list = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_list.csv')
+
+ramp_metadata_df = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv') %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  left_join(bifido_responders) %>%
+  filter(participant_id %in% final_participant_list$participant_id)
+
+final_participant_timepoint = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_timepoint.csv') 
+
+ramp_metadata_all_timepoints = final_participant_timepoint %>% 
+  rowwise() %>%
+  mutate(participant_id = strsplit(participant_timepoint, '_')[[1]][1],
+         timepoint = strsplit(participant_timepoint, '_')[[1]][2]) %>%
+  left_join(ramp_metadata_df) %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+
+ramp_metadata_df %>% 
+  filter(covid_deviation == TRUE) %>%
+  group_by(final_grp) %>%
+  dplyr::summarise(n())
+```
+
+
+```{r load_olink_data}
+proteins_to_remove = c('IL5', 'NRTN', 'LIF', 'IL4', 'IL33', 'IL20', 'ARTN', 'IL13', 'IL24', 'betangf', 'il22_ra1', 'IL10RA', 'fgf23_inflam', 'TSLP', 'IL2', 'il1_alpha', 'IL2RB', 'IL20RA', 'IL17A', 'MCP3', 'GDNF', 'IL2', 'IL10RA', 'FGF5', 'IL15RA', 'IL24', 'NT3') %>% tolower()
+
+
+olink_results_raw = read_csv('/home/mmcarter/user_data/scripts/210609_ramp_olink_results/RAMP_Olink_Redcap.csv') %>%
+  dplyr::rename(participant_id = 1) %>%
+  dplyr::filter(redcap_event_name != 'week_10_arm_1') %>%
+  mutate(redcap_event_name = ifelse(redcap_event_name == 'baseline_2b_arm_1', 'baseline_2_arm_1', redcap_event_name),
+         redcap_event_name = ifelse(redcap_event_name == 'baseline_1b_arm_1', 'baseline_2_arm_1', redcap_event_name),
+         redcap_event_name = factor(redcap_event_name, levels=c('baseline_2_arm_1', 'baseline_arm_1', 'week_3_arm_1', 'week_6_arm_1'))) %>%
+  mutate(timepoint = case_when(
+    redcap_event_name == 'baseline_2_arm_1' ~ '1',
+    redcap_event_name == 'baseline_arm_1' ~ '2',
+    redcap_event_name == 'week_3_arm_1' ~ '3',
+    redcap_event_name == 'week_6_arm_1' ~ '4',
+  ),
+  participant_timepoint = paste0(participant_id, '_', timepoint)) %>%
+  select(participant_timepoint, 4:95) %>%
+  select(-c(proteins_to_remove))
+
+olink_results_merged = final_participant_timepoint %>%
+  left_join(olink_results_raw) %>%
+  filter(!grepl('_5', participant_timepoint))
+
+olink_results_merged.impute = olink_results_merged %>%
+  column_to_rownames(var='participant_timepoint') %>%
+  as.matrix() %>%
+  impute.knn()
+
+olink_results_cleaned = olink_results_merged.impute$data %>%
+  as.data.frame() 
+
+top_var_cytos = olink_results_cleaned %>%
+  summarise_if(is.numeric, var) %>%
+  gather(key='cyto', value='var') %>%
+  arrange(desc(var)) %>%
+  # top_frac(0.75) %>%
+  pull(cyto)
+
+olink_results_cleaned_scaled = olink_results_cleaned %>%
+  scale() %>%
+  as.data.frame() 
+
+write.csv(olink_results_cleaned_scaled, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/OLINK/olink_results_scaled.csv', quote = F, row.names = T)
+```  
+  
+```{r}
+olink_maaslin_meta = ramp_metadata_all_timepoints %>%
+  filter(!participant_id %in% c('4011', '4086', '4074')) %>%
+  mutate(timepoint = as.numeric(timepoint)) %>%
+  filter(timepoint == 1 | timepoint == 2 | timepoint == 3 | timepoint == 4) %>%
+  mutate(final_grp_mod = case_when(
+    final_grp == 'Placebo' ~ 0,
+    final_grp == 'Low Dose 2FL' ~ 1,
+    final_grp == 'High Dose 2FL' ~ 2
+  ),
+  time_treat = timepoint * final_grp_mod,
+  treat_mod_coarse = case_when(
+    final_grp == 'Placebo' ~ 0, 
+    TRUE ~ 1
+  ),
+  time_treat_coarse = timepoint * treat_mod_coarse,
+  responder_mod = ifelse(responder_status_delta == 'responder', 1, 0),
+  time_responder = responder_mod * timepoint,
+  phase = case_when(
+    timepoint == 1 ~ 'Baseline',
+    timepoint == 2 ~ 'Baseline',
+    timepoint == 3 ~ 'Intervention',
+    timepoint == 4 ~ 'Intervention'
+  ),
+  phase_mod = ifelse(phase == 'Intervention', 1, 0),
+  phase_grp = final_grp_mod*phase_mod,
+  phase_responder_grp = responder_mod * phase_mod) %>%
+  column_to_rownames(var='participant_timepoint')
+
+
+olink_results_cleaned_scaled_filtered = olink_results_cleaned_scaled[row.names(olink_maaslin_meta), ]
+
+```
+
+
+```{r maaslin}
+
+## ALL
+
+mas_treatment_grp <- Maaslin2(
+  input_data = olink_results_cleaned_scaled_filtered,
+  input_metadata = olink_maaslin_meta,
+  output = "/home/mmcarter/user_data/Projects/RAMP/OLINK/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.0,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("final_grp", "phase_grp"),
+  random_effects = c("participant_id"),
+  reference = c('final_grp,Placebo'),
+  correction = "BH",
+  standardize = FALSE,
+  cores = 1)
+
+mas_treatment_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval)
+
+
+## PLACEBO V. HIGH DOSE
+placebo_v_highdose_olink_meta = olink_maaslin_meta %>% 
+  filter(final_grp == 'Placebo' | final_grp == 'High Dose 2FL')
+
+placebo_v_highdose_placebo_v_highdose_olink_meta = olink_results_cleaned_scaled_filtered[row.names(placebo_v_highdose_olink_meta), ] 
+
+placebo_v_highdose_mas_treatment_grp <- Maaslin2(
+  input_data = placebo_v_highdose_placebo_v_highdose_olink_meta,
+  input_metadata = placebo_v_highdose_olink_meta,
+  output = "/home/mmcarter/user_data/Projects/RAMP/OLINK/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.0,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("final_grp", "phase_grp"),
+  random_effects = c("participant_id"),
+  reference = c('final_grp,Placebo'),
+  correction = "BH",
+  standardize = FALSE,
+  cores = 1)
+
+placebo_v_highdose_mas_treatment_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval)
+
+## PLACEBO V. LOW DOSE
+placebo_v_lowdose_olink_meta = olink_maaslin_meta %>% 
+  filter(final_grp == 'Placebo' | final_grp == 'Low Dose 2FL')
+
+placebo_v_lowdose_placebo_v_lowdose_olink_meta = olink_results_cleaned_scaled_filtered[row.names(placebo_v_lowdose_olink_meta), ] 
+
+placebo_v_lowdose_mas_treatment_grp <- Maaslin2(
+  input_data = placebo_v_lowdose_placebo_v_lowdose_olink_meta,
+  input_metadata = placebo_v_lowdose_olink_meta,
+  output = "/home/mmcarter/user_data/Projects/RAMP/OLINK/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.0,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("final_grp", "phase_grp"),
+  random_effects = c("participant_id"),
+  reference = c('final_grp,Placebo'),
+  correction = "BH",
+  standardize = FALSE,
+  cores = 1)
+
+placebo_v_lowdose_mas_treatment_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval)
+
+
+## HIGH DOSE V. LOW DOSE
+highdose_v_lowdose_olink_meta = olink_maaslin_meta %>% 
+  filter(final_grp == 'High Dose 2FL' | final_grp == 'Low Dose 2FL')
+
+highdose_v_lowdose_highdose_v_lowdose_olink_meta = olink_results_cleaned_scaled_filtered[row.names(highdose_v_lowdose_olink_meta), ] 
+
+highdose_v_lowdose_mas_treatment_grp <- Maaslin2(
+  input_data = highdose_v_lowdose_highdose_v_lowdose_olink_meta,
+  input_metadata = highdose_v_lowdose_olink_meta,
+  output = "/home/mmcarter/user_data/Projects/RAMP/OLINK/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.0,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("final_grp", "phase_grp"),
+  random_effects = c("participant_id"),
+  reference = c('final_grp,Low Dose 2FL'),
+  correction = "BH",
+  standardize = FALSE,
+  cores = 1)
+
+highdose_v_lowdose_mas_treatment_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval)
+
+```
+
+
+```{r volcano_plots}
+
+highdose_placebo_olink_volcano = placebo_v_highdose_mas_treatment_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval) %>%
+  mutate(group = ifelse(sign(coef) == 1, 'High Dose', 'Placebo')) 
+
+highdose_placebo_olink_volcano = ggplot(highdose_placebo_olink_volcano, aes(x=coef, y=-log10(qval))) +
+  geom_hline(yintercept = 1.3, linetype='dashed') +
+  geom_vline(xintercept = 0, linetype='dashed') +
+  geom_point(aes(color=factor(sign(coef)))) +
+  scale_color_manual(values=c('#5ea1d7', '#b4cce1')) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  guides(color=FALSE) 
+
+
+highdose_lowdose_olink_volcano = highdose_v_lowdose_mas_treatment_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval) %>%
+  mutate(group = ifelse(sign(coef) == 1, 'High Dose', 'Low Dose')) 
+
+highdose_lowdose_olink_volcano = ggplot(highdose_lowdose_olink_volcano, aes(x=coef, y=-log10(qval))) +
+  geom_hline(yintercept = 1.3, linetype='dashed') +
+  geom_vline(xintercept = 0, linetype='dashed') +
+  geom_point(aes(color=factor(sign(coef)))) +
+  scale_color_manual(values=c('#5ea1d7', '#b4cce1')) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  guides(color=FALSE) 
+
+```
+
+```{r r_v_nr_maaslin}
+mas_responder_status <- Maaslin2(
+  input_data = olink_results_cleaned_scaled_filtered,
+  input_metadata = olink_maaslin_meta,
+  output = "/home/mmcarter/user_data/Projects/RAMP/OLINK/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.0,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("responder_status_delta", "phase_responder_grp"),
+  random_effects = c("participant_id"),
+  reference = c('responder_status_delta,nonresponder'),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+mas_responder_status$results %>%
+  filter(value == 'phase_responder_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval)
+
+  
+```
+
+
+```{r }
+ggplot(mas_treatment_grp$results %>% filter(metadata == 'time_treat'), aes(x=coef, y=-log10(qval))) +
+  geom_point()
+
+olink_rnr_enrichment_volcano = ggplot(mas_responder_status$results %>% filter(metadata == 'phase_responder_grp') %>% mutate(qval = p.adjust(pval, method='BH')), aes(x=coef, y=-log10(qval))) +
+  geom_point(aes(color=factor(sign(coef)))) +
+  geom_text_repel(data = mas_responder_status$results %>% filter(metadata == 'phase_responder_grp') %>% mutate(qval = p.adjust(pval, method='BH')) %>% filter(qval < 0.1), aes(label=feature), size=2) +
+  geom_hline(yintercept = -log10(0.1)) +
+  scale_color_manual(values=c('#d75e65', '#5e65d7')) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  xlim(-0.10, 0.25) +
+  guides(color=FALSE)
+
+sig_proteins = mas_responder_status$results %>% filter(metadata == 'phase_responder_grp') %>% mutate(qval = p.adjust(pval, method='BH')) %>%filter(qval < 0.1) %>% pull(feature) %>% sort()
+length(sig_proteins)
+
+sig_proteins_with_coef = mas_responder_status$results %>% 
+  filter(metadata == 'time_responder' & qval < 0.1) %>%
+  select(feature, coef) %>%
+  rowwise() %>%
+  mutate(coef = exp(coef)) %>%
+  mutate(feature = toupper(feature))
+write.csv(sig_proteins_with_coef, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/OLINK/sig_proteins_with_coef.csv',
+          row.names=F)
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/olink_rnr_enrichment_volcano.pdf', plot = olink_rnr_enrichment_volcano, units=c('in'), width=3.5, height=3.5)
+
+olink_plot_df = olink_results_cleaned %>%
+  rownames_to_column(var='sample_id') %>%
+  left_join(olink_maaslin_meta %>% rownames_to_column(var='sample_id')) %>%
+  gather(key='cytokine', value='npx', 2:69) %>%
+  filter(!is.na(participant_id))
+
+fgf21_figure = ggplot(olink_plot_df %>% filter(cytokine == 'fgf21_inflam'), aes(x=timepoint, y=npx)) +
+  geom_boxplot(aes(group=timepoint, fill=final_grp)) +
+  stat_smooth(method='lm') +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  facet_wrap(~final_grp) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  guides(fill=FALSE)
+
+summary(lm(npx ~ timepoint, olink_plot_df %>% filter(cytokine == 'fgf21_inflam') %>% filter(final_grp == 'High Dose 2FL')))
+summary(lm(npx ~ timepoint, olink_plot_df %>% filter(cytokine == 'fgf21_inflam') %>% filter(final_grp == 'Low Dose 2FL')))
+summary(lm(npx ~ timepoint, olink_plot_df %>% filter(cytokine == 'fgf21_inflam') %>% filter(final_grp == 'Placebo')))
+
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/olink_fgf21.pdf', plot = fgf21_figure, units=c('in'), width=3.5, height=2.5)
+
+wilcox.test(olink_plot_df %>% filter(cytokine == 'fgf21_inflam') %>% filter(final_grp == 'High Dose 2FL') %>% filter(timepoint == 2) %>% pull(npx),
+            olink_plot_df %>% filter(cytokine == 'fgf21_inflam') %>% filter(final_grp == 'High Dose 2FL') %>% filter(timepoint == 4) %>% pull(npx),
+            paired=T)
+
+wilcox.test(olink_plot_df %>% filter(cytokine == 'fgf21_inflam') %>% filter(final_grp == 'Low Dose 2FL') %>% filter(phase == 'Baseline') %>% pull(npx),
+            olink_plot_df %>% filter(cytokine == 'fgf21_inflam') %>% filter(final_grp == 'Low Dose 2FL') %>% filter(phase == 'Intervention') %>% pull(npx))
+
+wilcox.test(olink_plot_df %>% filter(cytokine == 'fgf21_inflam') %>% filter(final_grp == 'Placebo') %>% filter(timepoint == 2) %>% pull(npx),
+            olink_plot_df %>% filter(cytokine == 'fgf21_inflam') %>% filter(final_grp == 'Placebo') %>% filter(timepoint == 4) %>% pull(npx))
+
+olink_plot_df %>% pull(cytokine) %>% unique() %>% sort()
+
+true_hits = mas_responder_status$results %>% filter(metadata == 'phase_responder_grp') %>% mutate(qval = p.adjust(pval, method='BH')) %>% filter(qval < 0.1) %>% nrow()
+
+```
+
+
+
+```{r olink_shuffle}
+# 
+# repeat_hits = c()
+for (i in 1:120) {
+  mod_group_shuffle = ramp_metadata_df %>%
+    mutate(mod_group = sample(responder_status_delta)) %>%
+    select(participant_id, mod_group)
+
+olink_maaslin_meta_shuffle = olink_maaslin_meta %>%
+  rownames_to_column(var='participant_timepoint') %>%
+  left_join(mod_group_shuffle) %>%
+  mutate(responder_mod_shuff = ifelse(mod_group == 'responder', 1, 0),
+  time_responder_shuff = responder_mod_shuff * timepoint,
+  phase = case_when(
+    timepoint == 1 ~ 'Baseline',
+    timepoint == 2 ~ 'Baseline',
+    timepoint == 3 ~ 'Intervention',
+    timepoint == 4 ~ 'Intervention'
+  ),
+  phase_mod = ifelse(phase == 'Intervention', 1, 0),
+  phase_responder_shuff = responder_mod_shuff * phase_mod) %>%
+  column_to_rownames(var='participant_timepoint')
+
+mas_responder_status_shuffle = Maaslin2(
+  input_data = olink_results_cleaned_scaled_filtered,
+  input_metadata = olink_maaslin_meta_shuffle,
+  output = "/home/mmcarter/user_data/Projects/RAMP/OLINK/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.0,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.1,
+  fixed_effects = c("mod_group", "phase_responder_shuff"),
+  random_effects = c("participant_id"),
+  reference = c('mod_group,nonresponder'),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 4,
+  plot_heatmap = F, plot_scatter = F)
+
+  hits = mas_responder_status_shuffle$results %>% filter(metadata == 'phase_responder_shuff') %>% mutate(qval = p.adjust(pval, method='BH')) %>% filter(qval < 0.1) %>% nrow()
+  repeat_hits = c(repeat_hits, hits)
+  print(hits)
+
+}
+
+length(repeat_hits > 8)
+```
+
+
+```{r }
+length(repeat_hits)
+olink_sig_hits_repeated = repeat_hits %>% as.data.frame() %>% rename(num = 1) %>% arrange(desc(num))
+
+x = nrow(olink_sig_hits_repeated %>% filter(num > true_hits)) / nrow(olink_sig_hits_repeated)
+
+1 - x
+
+simulated_olink_correlations = ggplot(olink_sig_hits_repeated, aes(x=num)) +
+  geom_histogram(binwidth=1) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  geom_vline(xintercept=true_hits)
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/olink_simulated_associations_v2.pdf',
+       simulated_olink_correlations, 
+       height=3, width=4)
+
+
+sort(num_sig)
+
+shuff_cleaned_merged = olink_results_cleaned_scaled_filtered %>%
+  rownames_to_column(var='participant_timepoint') %>%
+  left_join(olink_maaslin_meta_shuffle %>% rownames_to_column(var='participant_timepoint'))
+
+ggplot(shuff_cleaned_merged, aes(x=timepoint, y=cd40, color=responder_status_delta)) +
+  geom_point() +
+  geom_text(aes(label=participant_id)) +
+  stat_smooth(method='lm')
+```
+

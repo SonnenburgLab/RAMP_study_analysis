@@ -1,0 +1,486 @@
+---
+title: "RAMP Phosphoflow"
+output: html_document
+date: '2022-08-28'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readxl)
+```
+
+```{r load_metadata}
+bifido_responders = read_csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/16S_bifido_responder_status.csv') %>%
+  mutate(participant_id = factor(participant_id))
+
+
+final_participant_list = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_list.csv')
+
+ramp_metadata_df = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv') %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  left_join(bifido_responders)
+
+
+final_participant_timepoint = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_timepoint.csv') 
+
+ramp_metadata_all_timepoints = final_participant_timepoint %>% 
+  rowwise() %>%
+  mutate(participant_id = strsplit(participant_timepoint, '_')[[1]][1],
+         timepoint = strsplit(participant_timepoint, '_')[[1]][2]) %>%
+  left_join(ramp_metadata_df) %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+sample_manifest = read_csv('/home/mmcarter/user_data/Projects/RAMP/PHOSPHOFLOW/210413_RAMP_phosphoflow_manifest.csv') %>%
+  select(PPID, BiobankID) %>% 
+  rename(participant_id = 1, 
+         biobank_id = 2) %>%
+  rowwise() %>%
+  mutate(participant_id = as.character(participant_id)) %>%
+  distinct()
+```
+
+
+```{r read_files}
+
+
+file_path <- "/home/mmcarter/user_data/Projects/RAMP/PHOSPHOFLOW/phosphoflow_data_raw/"
+sheet_names <- excel_sheets(paste(file_path, "RAMP_phosphoflow_plate1.xlsx", sep = ""))
+
+file_list <- list.files(path = file_path, pattern = ".xlsx")
+
+
+file_dfs <- list()
+k = 1
+
+for (selected_file in file_list){
+  print(selected_file)
+  tabs_list <- list()
+  
+  for (sheet in sheet_names){
+    # print(sheet)
+    df <- read_excel(paste(file_path, selected_file, sep = ""), sheet = sheet, skip = 0) %>%
+      rename(Sample = 1)
+    tabs_list[[sheet]] <- df
+  }
+  
+  # print(tabs_list)
+  
+  plate = str_remove(strsplit(selected_file, '_')[[1]][3], '.xlsx')
+  
+  joined_file <- plyr::join_all(tabs_list, by = 'Sample', type = 'left')
+  joined_file[["Plate"]] <- plate
+  file_dfs[[selected_file]] <- joined_file
+  k <- k + 1
+  
+  # print(colnames(joined_file))
+}
+
+full_df <- bind_rows(file_dfs)
+
+clean_df <- full_df %>% 
+  dplyr::filter(Sample != "Mean") %>% 
+  dplyr::filter(Sample != "SD") %>% 
+  dplyr::filter(!is.na(Sample)) %>%
+  mutate(Control = grepl('HC', Sample))
+
+
+sample_df <- dplyr::filter(clean_df, Control == FALSE)
+controls_df <- dplyr::filter(clean_df, Control == TRUE)
+
+participants_with_low_freq = clean_df %>%
+  gather(key='condition', value='level', -Sample, -Plate) %>%
+  filter(grepl('Parent', condition)) %>%
+  filter(level < 1) %>%
+  select(Sample) %>%
+  tidyr::separate(col = Sample,
+                  into = c("temp1", "Condition", "temp2", "temp3"), sep = "_", remove = FALSE) %>%
+  tidyr::separate(col = temp1,
+                  into = c("Timepoint", "Part", "TreatmentArm", "ParticipantTimepoint"), 
+                  sep='-', remove = FALSE) %>%
+  rowwise() %>%
+  mutate(Participant = str_split(ParticipantTimepoint, '[[:letter:]]')[[1]][1]) %>%
+  filter(!is.na(Participant)) %>%
+  pull(Participant) %>%
+  unique() 
+
+```
+
+```{r }
+name_key <- data.frame(original_name = colnames(sample_df))
+name_key <- name_key %>% dplyr::filter(original_name != "Plate") %>% 
+  dplyr::filter(original_name != "Control") %>% 
+  dplyr::filter(original_name != "Sample")
+
+
+name_key[["Protein"]] <- "p"
+phospho_list <- c("pSTAT3", "pSTAT1", "pSTAT5", "Freq")
+
+for (phospho in phospho_list){
+  ind <- grep(phospho, name_key$original_name)
+  name_key[ind, "Protein"] <- phospho
+}
+
+name_key[["Celltype"]] <- "c"
+ct_list_regex <- c("B cells", "CD4\\+", "CD4\\+CD45RA\\+", "CD4\\+CD45RA\\-", "CD8", "CD8\\+CD45RA\\+", "CD8\\+CD45RA\\-", "Non BT", "Monocytes")
+ct_list <- c("Bcells", "CD4Tcells", "CD4TcellsCD45RApos", "CD4TcellsCD45RAneg", "CD8Tcells", "CD8TcellsCD45RApos", "CD8TcellsCD45RAneg", "NonBT", "Monocytes")
+
+for (i in 1:length(ct_list)){
+  ind <- grep(ct_list_regex[i], name_key$original_name)
+  name_key[ind, "Celltype"] <- ct_list[i]
+}
+name_key <- tidyr::unite(name_key, col = new_name, Celltype:Protein, sep = "_", remove = FALSE)
+# name_key$original_name <- droplevels(name_key$original_name)
+```
+
+```{r sample_ID_parsing}
+main_df <- sample_df %>% 
+  tidyr::separate(col = Sample,
+                  into = c("temp1", "Condition", "temp2", "temp3"), sep = "_", remove = FALSE) %>%
+  tidyr::separate(col = temp1,
+                  into = c("Timepoint", "Part", "TreatmentArm", "ParticipantTimepoint"), 
+                  sep='-', remove = FALSE) %>%
+  select(c(-temp1, -temp2, -temp3, -Sample))
+
+meta_df = main_df %>%
+  select(ParticipantTimepoint, TreatmentArm, Timepoint) %>%
+  distinct()
+```
+
+```{r separate_basal}
+basal_main_df <- main_df %>% dplyr::filter(Condition == "US") %>% arrange(ParticipantTimepoint)
+basal_main_numeric <- basal_main_df %>% select(-(Timepoint:Condition), -c(Plate, Control))
+```
+
+```{r condition_parse}
+conditions <- c("IFNa", "IFNg", "IL10", "IL2", "IL6", "IL7", "IL21")
+fold_df_list <- list()
+
+for (condition in conditions){
+  cond_df <- main_df %>% 
+    dplyr::filter(Condition == condition) %>% 
+    arrange(ParticipantTimepoint) %>%
+    select(-(Timepoint:Condition), -c(Plate, Control))
+  metadata <- main_df %>% 
+    dplyr::filter(Condition == condition) %>% 
+    arrange(ParticipantTimepoint) %>%
+    select(Timepoint:Condition)
+  fold_df <- cond_df/basal_main_numeric
+  fold_df <- bind_cols(metadata, fold_df)
+  fold_df_list[[condition]] <- fold_df
+}
+
+fix_to_one = function(input) {
+  if(input < 1) {input = 1}
+  return(input)
+}
+
+fold_main_df <- bind_rows(fold_df_list) %>%
+  distinct() %>%
+  gather(key='condition', value='level', -Timepoint, -Part, -TreatmentArm, -ParticipantTimepoint, -Condition) %>%
+  mutate(level = ifelse(!grepl('Parent', condition) & level < 1, 1, level)) %>%
+  spread(key='condition', value='level')
+
+df_list <- list()
+
+name_dict = list(name_key$original_name, name_key$new_name)
+
+for (condition in conditions){
+  df <- fold_main_df %>% 
+    dplyr::filter(Condition == condition) %>% 
+    dplyr::select(-Timepoint, -Part, -TreatmentArm, -Condition) %>% 
+    rename_at(vars(name_key$original_name), ~paste(condition, name_key$new_name, sep='_'))
+  df_list[[condition]] <- df %>% ungroup()
+}
+
+fold_main_conditions_df <- plyr::join_all(df_list, by='ParticipantTimepoint', type = 'left')
+colnames(fold_main_conditions_df)
+
+compiled_structures <- list(main_df, basal_main_df, name_key, fold_main_df, fold_main_conditions_df)
+
+phosphoflow_data.imputed = fold_main_conditions_df %>%
+  rowwise() %>%
+  mutate(
+    Participant = str_split(ParticipantTimepoint, '[[:letter:]]')[[1]][1],
+    timepoint = ifelse(grepl('B', ParticipantTimepoint), '2', '4'),
+    biobank_id = as.character(Participant),
+    biobank_id = ifelse(nchar(biobank_id) == 2, paste0('0', biobank_id), biobank_id),
+    biobank_id = ifelse(nchar(biobank_id) == 1, paste0('00', biobank_id), biobank_id),
+    biobank_id = paste0('47252-0', biobank_id)) %>%
+  left_join(sample_manifest) %>%
+  ungroup() %>%
+  mutate(participant_timepoint = paste0(participant_id, '_', timepoint)) %>%
+  arrange(participant_timepoint) %>%
+  select(participant_timepoint, everything(), -c(biobank_id, ParticipantTimepoint, Participant, timepoint, participant_id)) %>%
+  right_join(final_participant_timepoint %>% filter(grepl('_2', participant_timepoint) | grepl('_4', participant_timepoint))) %>%
+  column_to_rownames(var='participant_timepoint') %>%
+  rename_with(~paste0("phosphoflow_", .), names(.)) %>%
+  as.matrix() %>%
+  impute.knn()
+
+phosphoflow_data_top_variance_cols = phosphoflow_data.imputed$data %>%
+  # scale() %>%
+  as.data.frame() %>%
+  summarise_if(is.numeric, var) %>%
+  gather(key='feature', value='variance') %>%
+  arrange(desc(variance)) %>%
+  top_frac(0.75) %>%
+  pull(feature)
+
+phosphoflow_data_cleaned_scaled = phosphoflow_data.imputed$data %>%
+  as.data.frame() %>%
+  select(c(phosphoflow_data_top_variance_cols)) %>%
+  scale() %>%
+  as.data.frame()
+
+
+write.csv(phosphoflow_data_cleaned_scaled, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/PHOSPHOFLOW/phosphoflow_results_scaled.csv', quote = F, row.names = T)
+
+phosphoflow_data_cleaned = phosphoflow_data.imputed$data %>%
+  as.data.frame()
+
+```
+
+```{r phosphoflow_maaslin}
+
+phosphoflow_maaslin_meta = ramp_metadata_all_timepoints %>%
+  column_to_rownames(var='participant_timepoint')
+phosphoflow_maaslin_meta_filtered = phosphoflow_maaslin_meta[rownames(phosphoflow_data_cleaned), ] %>%
+  rownames_to_column(var='participant_timepoint') %>%
+  mutate(timepoint = as.numeric(timepoint)) %>%
+  filter(timepoint == 2 | timepoint == 4) %>%
+  mutate(treat_mod = case_when(
+    final_grp == 'Placebo' ~ 0,
+    final_grp == 'Low Dose 2FL' ~ 1,
+    final_grp == 'High Dose 2FL' ~ 2
+  ),
+  time_treat = timepoint * treat_mod,
+  treat_mod_coarse = case_when(
+    final_grp == 'Placebo' ~ 0, 
+    TRUE ~ 1
+  ),
+  time_treat_coarse = timepoint * treat_mod_coarse,
+  responder_mod = ifelse(responder_status_delta == 'responder', 1, 0),
+  time_responder = responder_mod * timepoint) %>%
+  column_to_rownames(var='participant_timepoint')
+
+
+mas_phosphoflow_grp <- Maaslin2(
+  input_data = phosphoflow_data_cleaned,
+  input_metadata = phosphoflow_maaslin_meta_filtered,
+  output = "/home/mmcarter/user_data/Projects/RAMP/PHOSPHOFLOW/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("final_grp", "time_treat"),
+  random_effects = c("participant_id"),
+  reference = c("final_grp,Placebo"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+mas_phosphoflow_grp <- Maaslin2(
+  input_data = phosphoflow_data_cleaned_scaled,
+  input_metadata = phosphoflow_maaslin_meta_filtered,
+  output = "/home/mmcarter/user_data/Projects/RAMP/PHOSPHOFLOW/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("responder_status_delta", "time_responder"),
+  random_effects = c("participant_id"),
+  reference = c("responder_status_delta,nonresponder"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+
+```
+
+```{r crs_test}
+CRS_features <- c("IFNa_CD8Tcells_pSTAT1", "IFNa_CD8Tcells_pSTAT3", "IFNa_CD8Tcells_pSTAT5",
+                  "IL6_CD8Tcells_pSTAT1", "IL6_CD8Tcells_pSTAT3", "IL6_CD8Tcells_pSTAT5",
+                  "IFNg_CD8Tcells_pSTAT1", "IFNa_CD4Tcells_pSTAT5", "IL6_CD4Tcells_pSTAT5",
+                  "IFNa_Bcells_pSTAT1", "IL10_Monocytes_pSTAT3", "IFNg_Monocytes_pSTAT3",
+                  "IFNa_Monocytes_pSTAT3", "IL6_Monocytes_pSTAT3")
+
+
+# need to have it from the version that has the conditions in it
+CRS_feature_df <- select(fold_main_conditions_df, c(any_of(CRS_features)))
+
+# calculating CRS score:
+
+normed_values <- apply(CRS_feature_df, 2, function(x) (x-min(x, na.rm = TRUE))/(max(x, na.rm = TRUE)- min(x, na.rm = TRUE)))
+CRS_scores <- apply(normed_values, 1, sum)
+
+CRS_df <- data.frame(select(fold_main_conditions_df, ParticipantTimepoint), CRS_scores) %>%
+  left_join(meta_df) %>%
+  rowwise() %>%
+  mutate(Participant = str_split(ParticipantTimepoint, '[[:letter:]]')[[1]][1]) %>%
+  select(Participant, Timepoint, TreatmentArm, CRS_scores) %>%
+  mutate(TreatmentArm = factor(TreatmentArm, levels=c('91', '92', '93')),
+         Participant = factor(Participant)) %>%
+  filter(!Participant %in% participants_with_low_freq)
+
+meta_df_with_covid = meta_df %>%
+  rowwise() %>%
+  mutate(
+    Participant = str_split(ParticipantTimepoint, '[[:letter:]]')[[1]][1],
+    timepoint = ifelse(grepl('B', ParticipantTimepoint), '2', '4'),
+    biobank_id = as.character(Participant),
+    biobank_id = ifelse(nchar(biobank_id) == 2, paste0('0', biobank_id), biobank_id),
+    biobank_id = ifelse(nchar(biobank_id) == 1, paste0('00', biobank_id), biobank_id),
+    biobank_id = paste0('47252-0', biobank_id)) %>%
+  left_join(sample_manifest) %>%
+  left_join(ramp_metadata_df)
+
+CRS_df_all = data.frame(select(fold_main_conditions_df, ParticipantTimepoint), CRS_scores) %>%
+  left_join(meta_df) %>%
+  rowwise() %>%
+  mutate(Participant = str_split(ParticipantTimepoint, '[[:letter:]]')[[1]][1]) %>%
+  select(Participant, Timepoint, TreatmentArm, CRS_scores) %>%
+  mutate(TreatmentArm = factor(TreatmentArm, levels=c('91', '92', '93')),
+         Participant = factor(Participant),
+         final_grp = case_when(
+           TreatmentArm == '91' ~ 'Low Dose 2FL',
+           TreatmentArm == '92' ~ 'Placebo',
+           TreatmentArm == '93' ~ 'High Dose 2FL'
+         )) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+treatment_arm_names <- list(
+  '91'="Treatment Group 91",
+  '92'="Treatment Group 92",
+  '93'="Treatment Group 93"
+)
+
+treatment_arm_labeller <- function(variable,value){
+  return(treatment_arm_names[value])
+}
+
+crs_over_time_boxplot = ggplot(CRS_df_all, aes(x=Timepoint, y=CRS_scores)) +
+  geom_point(aes(group=Participant),size=2, alpha=0.7) +
+  geom_line(aes(group=Participant), alpha=0.7) +
+  geom_boxplot(aes(fill=final_grp), outlier.size=0) +
+  facet_wrap(~final_grp) +
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ylab('CRS Score') +
+  guides(fill = FALSE) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  scale_y_continuous(breaks=c(0, 2, 4, 6, 8))
+
+wilcox.test(CRS_df_all %>% filter(final_grp == 'High Dose 2FL' & Timepoint == 'Baseline') %>% pull(CRS_scores),
+            CRS_df_all %>% filter(final_grp == 'High Dose 2FL' & Timepoint == 'End') %>% pull(CRS_scores),
+            paired=T)
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/PHOSPHOFLOW/figures/220203_phosphoflow_crs_baseline_end.pdf',
+       plot = crs_over_time_boxplot,
+       units = c('in'), width=5, height=3)
+
+
+CRS_df_spread = CRS_df %>%
+  spread(key='Timepoint', value='CRS_scores') %>%
+  mutate(delta_CRS = End - Baseline)
+
+change_in_crs_boxplot = ggplot(CRS_df_spread, aes(x=TreatmentArm, y=delta_CRS)) +
+  geom_boxplot(outlier.size=0, fill='#c0bcc6') +
+  geom_jitter(width=0.2) + 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ylab('Change in CRS score') +
+  xlab('Treatment Group')
+
+# ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/PHOSPHOFLOW/figures/210913_phosphoflow_crs_change.png',
+#        plot = change_in_crs_boxplot,
+#        units = c('in'), width=5, height=3)
+
+increase_decrease_table = CRS_df_spread %>%
+  rowwise() %>%
+  mutate(increase_decrease = ifelse(delta_CRS < 0, 'decrease', 'increase')) %>%
+  group_by(TreatmentArm, increase_decrease) %>%
+  dplyr::summarise(number = n())
+
+```
+
+
+```{r covid_deviation_analysis}
+meta_df_with_covid = meta_df %>%
+  rowwise() %>%
+  mutate(
+    Participant = str_split(ParticipantTimepoint, '[[:letter:]]')[[1]][1],
+    timepoint = ifelse(grepl('B', ParticipantTimepoint), '2', '4'),
+    biobank_id = as.character(Participant),
+    biobank_id = ifelse(nchar(biobank_id) == 2, paste0('0', biobank_id), biobank_id),
+    biobank_id = ifelse(nchar(biobank_id) == 1, paste0('00', biobank_id), biobank_id),
+    biobank_id = paste0('47252-0', biobank_id)) %>%
+  left_join(sample_manifest) %>%
+  left_join(ramp_metadata_df)
+
+CRS_df_all_covid = data.frame(select(fold_main_conditions_df, ParticipantTimepoint), CRS_scores) %>%
+  left_join(meta_df_with_covid) %>%
+  rowwise() %>%
+  mutate(Participant = str_split(ParticipantTimepoint, '[[:letter:]]')[[1]][1]) %>%
+  select(Participant, Timepoint, TreatmentArm, CRS_scores, covid_deviation) %>%
+  mutate(TreatmentArm = factor(TreatmentArm, levels=c('91', '92', '93')),
+         Participant = factor(Participant),
+         final_grp = case_when(
+           TreatmentArm == '91' ~ 'Low Dose 2FL',
+           TreatmentArm == '92' ~ 'Placebo',
+           TreatmentArm == '93' ~ 'High Dose 2FL'
+         )) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+
+crs_over_time_boxplot_deviation = ggplot(CRS_df_all_covid, aes(x=Timepoint, y=CRS_scores)) +
+  geom_point(aes(group=Participant),size=2, alpha=0.7) +
+  geom_line(aes(group=Participant), alpha=0.7) +
+  geom_boxplot(aes(fill=final_grp), outlier.size=0) +
+  facet_wrap(covid_deviation~final_grp) +
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ylab('CRS Score') +
+  guides(fill = FALSE) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  scale_y_continuous(breaks=c(0, 2, 4, 6, 8))
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/phosphoflow_crs_baseline_end_deviations.pdf',
+       plot = crs_over_time_boxplot_deviation,
+       units = c('in'), width=8, height=6)
+
+
+wilcox.test(CRS_df_all_covid %>% filter(final_grp == 'High Dose 2FL' & Timepoint == 'Baseline') %>% filter(covid_deviation == FALSE)  %>% pull(CRS_scores),
+            CRS_df_all_covid %>% filter(final_grp == 'High Dose 2FL' & Timepoint == 'End') %>% filter(covid_deviation == FALSE) %>% pull(CRS_scores),
+            paired=T)
+
+wilcox.test(CRS_df_all_covid %>% filter(final_grp == 'Low Dose 2FL' & Timepoint == 'Baseline') %>% filter(covid_deviation == FALSE)  %>% pull(CRS_scores),
+            CRS_df_all_covid %>% filter(final_grp == 'Low Dose 2FL' & Timepoint == 'End') %>% filter(covid_deviation == FALSE) %>% pull(CRS_scores),
+            paired=T)
+
+wilcox.test(CRS_df_all_covid %>% filter(final_grp == 'Placebo' & Timepoint == 'Baseline') %>% filter(covid_deviation == FALSE)  %>% pull(CRS_scores),
+            CRS_df_all_covid %>% filter(final_grp == 'Placebo' & Timepoint == 'End') %>% filter(covid_deviation == FALSE) %>% pull(CRS_scores),
+            paired=T)
+
+
+wilcox.test(CRS_df_all_covid %>% filter(final_grp == 'High Dose 2FL' & Timepoint == 'Baseline') %>% filter(covid_deviation == TRUE)  %>% pull(CRS_scores),
+            CRS_df_all_covid %>% filter(final_grp == 'High Dose 2FL' & Timepoint == 'End') %>% filter(covid_deviation == TRUE) %>% pull(CRS_scores),
+            paired=T)
+
+wilcox.test(CRS_df_all_covid %>% filter(final_grp == 'Low Dose 2FL' & Timepoint == 'Baseline') %>% filter(covid_deviation == TRUE)  %>% pull(CRS_scores),
+            CRS_df_all_covid %>% filter(final_grp == 'Low Dose 2FL' & Timepoint == 'End') %>% filter(covid_deviation == TRUE) %>% pull(CRS_scores),
+            paired=T)
+
+wilcox.test(CRS_df_all_covid %>% filter(final_grp == 'Placebo' & Timepoint == 'Baseline') %>% filter(covid_deviation == TRUE)  %>% pull(CRS_scores),
+            CRS_df_all_covid %>% filter(final_grp == 'Placebo' & Timepoint == 'End') %>% filter(covid_deviation == TRUE) %>% pull(CRS_scores),
+            paired=T)
+```

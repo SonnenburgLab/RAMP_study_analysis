@@ -1,0 +1,635 @@
+---
+title: "RAMP SCFA Analysis"
+output: html_document
+date: '2022-08-24'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Maaslin2)
+library(impute)
+```
+
+
+```{r load_metadata}
+bifido_responders = read_csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/16S_bifido_responder_status.csv') %>%
+  mutate(participant_id = factor(participant_id))
+
+final_participant_list = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_list.csv')
+
+ramp_metadata_df = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv') %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  left_join(bifido_responders) %>%
+  filter(participant_id %in% final_participant_list$participant_id)
+
+sample_map = read.csv(file = '/home/mmcarter/user_data/Projects/RAMP/SCFA/210825_stool_sample_map.csv') %>%
+  mutate(scfa_index = as.character(scfa_index),
+         participant_id = as.character(participant_id))
+
+
+final_participant_timepoint = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_timepoint.csv') 
+
+ramp_metadata_all_timepoints = final_participant_timepoint %>% 
+  rowwise() %>%
+  mutate(participant_id = strsplit(participant_timepoint, '_')[[1]][1],
+         timepoint = strsplit(participant_timepoint, '_')[[1]][2]) %>%
+  left_join(ramp_metadata_df) %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+```
+
+```{r load_data}
+
+
+plate_map1 = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/210802_RAMP_SCFA_platemap1.csv')
+plate_map2 = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/210802_RAMP_SCFA_platemap2.csv')
+plate_map = rbind(plate_map1, plate_map2) %>%
+  rename(scfa_index = `SCFA Tube Index`,
+         well_position = Merge,
+         run_id = Run) %>%
+  mutate(run_id = as.character(run_id))
+
+worklist_map1 = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/210802_RAMP_SCFA_worklist1.csv',
+                        col_names = F) %>%
+  select(X1, X2, X3, X4) %>%
+  mutate(run_id = '1')
+worklist_map2 = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/210802_RAMP_SCFA_worklist2.csv',
+                        col_names = F) %>%
+  select(X1, X2, X3, X4) %>%
+  mutate(run_id = '2')
+worklist_map = rbind(worklist_map1, worklist_map2) %>%
+  rename(ms_sample_id = 1,
+         well_position = 2)
+
+sample_manifest = plate_map %>%
+  left_join(sample_map, by='scfa_index') %>%
+  left_join(worklist_map, by=c('well_position', 'run_id')) %>%
+  left_join(ramp_metadata_df, by='participant_id') %>%
+  distinct()
+
+sample_manifest_controls = sample_manifest %>%
+  filter(grepl('NPH', scfa_index))
+
+sample_manifest_no_controls = sample_manifest %>%
+  # Remove standards and controls from sample list
+  filter(!grepl('NPH', scfa_index)) %>%
+  filter(!grepl('dilute', scfa_index)) %>%
+  filter(!grepl('Standards', scfa_index))
+
+ms_samples_to_keep = sample_manifest_no_controls$ms_sample_id
+
+
+
+```
+
+```{r load_data}
+
+data1_df = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/210802_RAMP_SCFA_quant_set1.csv')
+data2_df = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/210802_RAMP_SCFA_quant_set2.csv')
+data_df = rbind(data1_df, data2_df)
+
+## Inspect controls
+
+control_data_df = data_df %>% 
+  left_join(sample_manifest_controls, by=c('sample'='ms_sample_id')) %>%
+  filter(!is.na(run_id)) %>%
+  rowwise() %>%
+  mutate(sample_counter = tail(strsplit(sample, '_')[[1]], n=1),
+         sample_counter = as.numeric(sample_counter)) %>%
+  filter(acid != 'hexanoate-3,3,3-d3') %>% 
+  filter(run_id == '1' & acid == 'acetate' & Plate == 'P1')
+
+ggplot(control_data_df, aes(x=sample_counter, y=acid_area, color=Plate)) +
+  geom_point(size=5) +
+  ylab('Acetate Peak Area') +
+  xlab('Sample Progress (within run)') +
+  ggtitle('Acetate ghost peak size over time') +
+  theme_bw() +
+  stat_smooth(method='lm')
+
+calculate_area_adjustment = function(acid_area, acid, run_id, plate, input_sample, control_data_df) {
+  if(is.na(acid_area)) {
+    return(0)
+  }
+  filtered_control_data = control_data_df %>%
+    filter(run_id == run_id & acid == acid & plate == plate)
+  ghost_peak_model = lm(acid_area ~ sample_counter, filtered_control_data)
+  ghost_peak_model_int = ghost_peak_model$coefficients[[1]]
+  ghost_peak_model_slope = ghost_peak_model$coefficients[[2]]
+  peak_area_adjustment = ghost_peak_model_int + ghost_peak_model_slope * input_sample
+  acid_area_adjusted = acid_area - peak_area_adjustment
+  if (acid_area_adjusted < 0) {
+    return(0)
+  } else {
+    return(acid_area_adjusted)
+  }
+}
+
+data_with_meta = data_df %>%
+  left_join(sample_manifest, by=c('sample'='ms_sample_id'))
+
+data_with_meta_no_controls = data_with_meta %>%
+  filter(sample %in% ms_samples_to_keep) %>%
+  filter(!is.na(participant_id)) %>%
+  rowwise() %>%
+  mutate(sample_counter = tail(strsplit(sample, '_')[[1]], n=1),
+         sample_counter = as.numeric(sample_counter),
+         acid_area_adjusted = calculate_area_adjustment(acid_area, acid, run_id, Plate, sample_counter,
+                                                        control_data_df),
+         ratio_adj = acid_area_adjusted / istd_area)
+
+data_with_meta_concentration = data_with_meta_no_controls %>%
+  ungroup() %>%
+  filter(acid != 'hexanoate-3,3,3-d3') %>%
+  filter(acid != '2/3-methylpentanoate') %>%
+  mutate(concentration = case_when(
+    acid == 'acetate' ~ ratio * 50.2 * 2.5,
+    acid == 'propionate' ~ ratio * 50.2,
+    TRUE ~ ratio * 50.2 * 0.5
+  ),
+  concentration = ifelse(is.na(concentration), 0., concentration)) %>%
+  mutate(concentration_adj = case_when(
+    acid == 'acetate' ~ ratio_adj * 50.2 * 2.5,
+    acid == 'propionate' ~ ratio_adj * 50.2,
+    TRUE ~ ratio_adj * 50.2 * 0.5
+  ),
+  concentration_adj = ifelse(is.na(concentration_adj), 0., concentration_adj)) %>%
+  mutate(acid = factor(acid, levels=c('acetate', 'propionate', 'butyrate', '2-methylpropionate', 'pentanoate', '3-methylbutyric', '2-methylbutyric', 'hexanoate', '4-methylpentanoate'))) %>%
+  distinct()
+
+data_with_meta_concentration %>%
+  filter(acid == '4-methylpentanoate')
+
+ggplot(data_with_meta_concentration %>% filter(run_id == '2' & acid == 'acetate'), aes(x=sample_counter, y=acid_area_adjusted, color=Plate)) +
+  geom_point(size=5) +
+  ylab('Acetate Peak Area') +
+  xlab('Sample Progress (within run)') +
+  ggtitle('Acetate ghost peak size over time') +
+  theme_bw() +
+  stat_smooth(method='lm')
+
+```
+
+
+```{r clean_scale_data}
+scfa_data = data_with_meta_concentration %>%
+  select(sample, acid, concentration, participant_id, stool_count) %>%
+  rowwise() %>%
+  mutate(participant_timepoint = paste0(participant_id, '_', stool_count)) %>%
+  select(-c(participant_id, stool_count)) %>%
+  mutate(acid = str_replace(paste0('scfa_', acid), '-', '_')) %>%
+  spread(key='acid', value='concentration')
+
+full_scfa_data.imputed = scfa_data %>%
+  right_join(final_participant_timepoint) %>%
+  select(-sample) %>%
+  arrange(participant_timepoint) %>%
+  filter(!grepl('_5', participant_timepoint)) %>%
+  column_to_rownames(var='participant_timepoint') %>%
+  as.matrix() %>%
+  impute.knn()
+
+full_scfa_data_cleaned_scaled = full_scfa_data.imputed$data %>%
+  scale() %>%
+  as.data.frame()
+
+write.csv(full_scfa_data_cleaned_scaled, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/SCFA/scfa_results_scaled.csv', quote = F, row.names = T)
+
+```
+
+```{r plot_data}
+
+data_with_meta_concentration_top3 = data_with_meta_concentration %>%
+  filter(acid %in% c('acetate', 'propionate', 'butyrate')) %>%
+  arrange(desc(concentration)) %>%
+  filter(!is.na(treatment_grp))
+
+treatment_arm_trace_violins_top3 = ggplot(data_with_meta_concentration_top3, aes(x=stool_count, y=concentration)) +
+  geom_violin(aes(group=stool_count, fill=final_grp), draw_quantiles = c(0.5), alpha=0.8) +
+  geom_line(aes(group=participant_id), alpha=0.15) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=330, hjust=0)) +
+  ylim(0, 140) +
+  ylab('Concentration (mM)') +
+  xlab('Timepoint (weeks)') +
+  facet_grid(final_grp~acid, scales='free') +
+  scale_fill_brewer(palette='Set2') +
+  guides(fill=guide_legend(title="Treatment Group")) +
+  scale_x_continuous(breaks=c(1, 2, 3, 4), 
+                     labels=c("Baseline (-2)", "Baseline (0)", "Midpoint (3)", "End (6)"))
+
+# ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/SCFA/figures/220117_treatment_arm_trace_violins_top3.png', plot = treatment_arm_trace_violins_top3,
+#        width=5.5,height=4, units=c('in'))
+
+```
+
+```{r diet_data}
+
+
+## Load diet data to use later
+diet_data_post_intervention = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/220205_RAMP_cronomber_post_macro_micro.csv') %>%
+  rowwise() %>%
+  rename(participant_pre = 1) %>% 
+  mutate(participant_id = strsplit(participant_pre, 'pi')[[1]][1]) %>%
+  select(participant_id, `Energy (kcal)`, `Carbs (g)`, `Fiber (g)`, `Starch (g)`, `Sugars (g)`, `Net Carbs (g)`, `Fat (g)`, `Protein (g)`, `Tryptophan (g)`, `Histidine (g)`, `Valine (g)`, `Isoleucine (g)`, `Leucine (g)`)
+
+data_with_meta_concentration_with_diet_post = data_with_meta_concentration %>% 
+  rowwise() %>%
+  left_join(diet_data_post_intervention, by='participant_id') %>%
+  filter(stool_count == 4)
+
+
+diet_data_baseline_intervention = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/220205_RAMP_cronomber_baseline_macro_micro.csv') %>%
+  rowwise() %>%
+  rename(participant_pre = 1) %>% 
+  mutate(participant_id = strsplit(participant_pre, 'b')[[1]][1]) %>%
+  select(participant_id, `Energy (kcal)`, `Carbs (g)`, `Fiber (g)`, `Starch (g)`, `Sugars (g)`, `Net Carbs (g)`, `Fat (g)`, `Protein (g)`,`Tryptophan (g)`, `Histidine (g)`, `Valine (g)`, `Isoleucine (g)`, `Leucine (g)`)
+
+data_with_meta_concentration_with_diet_baseline = data_with_meta_concentration %>% 
+  rowwise() %>%
+  left_join(diet_data_baseline_intervention, by='participant_id') %>%
+  filter(stool_count == 2)
+
+combined_diet_with_scfa_data = rbind(data_with_meta_concentration_with_diet_baseline, data_with_meta_concentration_with_diet_post) %>%
+  rowwise() %>%
+  mutate(timepoint = ifelse(stool_count == 2, 'Baseline', 'End')) %>%
+  mutate(sum_bcaa = `Valine (g)` + `Leucine (g)` + `Isoleucine (g)`)
+
+ggplot(combined_diet_with_scfa_data %>% filter(acid %in% c('acetate', 'propionate', 'butyrate')), aes(x=`Energy (kcal)`, y=concentration)) +
+  geom_point() +
+  facet_wrap(~acid, scales='free_y', ncol =1 ) +
+  stat_smooth(method='lm') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ylab('Concentration (uM)')
+
+summary(lm(concentration ~ `Energy (kcal)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
+summary(lm(concentration ~ `Energy (kcal)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'propionate')))
+summary(lm(concentration ~ `Energy (kcal)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'butyrate')))
+
+ggplot(combined_diet_with_scfa_data %>% filter(acid %in% c('acetate', 'propionate', 'butyrate')), aes(x=`Carbs (g)`, y=concentration)) +
+  geom_point() +
+  facet_wrap(~acid, scales='free_y', ncol =1 ) +
+  stat_smooth(method='lm') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ylab('Concentration (uM)')
+
+combined_diet_with_scfa_data %>%
+  spread(key='acid', value='concentration')
+
+
+
+scfa_maaslin_meta_df = combined_diet_with_scfa_data %>%
+  select(sample, participant_id, stool_count, final_grp, age, gender, responder_status_delta, EDTA_plasma, 40:52) %>%
+  distinct() %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  column_to_rownames(var='sample') %>%
+  rename(energy = 8,
+         carbs = 9,
+         fiber = 10,
+         starch = 11, 
+         sugars = 12,
+         net_carbs = 13,
+         fat = 14,
+         protein = 15,
+         tryptophan = 16) %>%
+  mutate(treat_mod = case_when(
+    final_grp == 'Placebo' ~ 0,
+    final_grp == 'Low Dose 2FL' ~ 1,
+    final_grp == 'High Dose 2FL' ~ 2
+  ),
+  time_treat = stool_count * treat_mod,
+  treat_mod_coarse = case_when(
+    final_grp == 'Placebo' ~ 0, 
+    TRUE ~ 1
+  ),
+  time_treat_coarse = stool_count * treat_mod_coarse,
+  responder_mod = ifelse(responder_status_delta == 'responder', 1, 0),
+  time_responder = responder_mod * stool_count) 
+
+scfa_abundance_df_filtered = scfa_abundance_df[row.names(scfa_maaslin_meta_df), ] %>%
+  # mutate(total_of_3 = acetate + propionate + butyrate) %>%
+  # select(acetate, propionate, butyrate, total_of_3) %>%
+  # scale() %>%
+  as.data.frame()
+
+mas_scfa <- Maaslin2(
+  input_data = scfa_abundance_df_filtered,
+  input_metadata = scfa_maaslin_meta_df,
+  output = "/home/mmcarter/user_data/Projects/RAMP/SCFA/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.0,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("energy"),
+  random_effects = c("participant_id"),
+  #reference = c('final_grp,Placebo'),
+  correction = "BH",
+  standardize = FALSE,
+  cores = 1)
+
+acetate_energy_corr_plot = ggplot(combined_diet_with_scfa_data %>% filter(acid == 'acetate'), aes(x=`Energy (kcal)`, y=concentration)) +
+  geom_point() +
+  stat_smooth(method='lm')+
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/scfa_acetate_energy_corr.pdf',
+       plot = acetate_energy_corr_plot,
+       width=3,height=3)
+
+propionate_energy_corr_plot = ggplot(combined_diet_with_scfa_data %>% filter(acid == 'propionate'), aes(x=`Energy (kcal)`, y=concentration)) +
+  geom_point() +
+  stat_smooth(method='lm') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/scfa_propionate_energy_corr.pdf',
+       plot = propionate_energy_corr_plot,
+       width=3,height=3)
+
+butyrate_energy_corr_plot = ggplot(combined_diet_with_scfa_data %>% filter(acid == 'butyrate'), aes(x=`Energy (kcal)`, y=concentration)) +
+  geom_point() +
+  stat_smooth(method='lm') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/scfa_butyrate_energy_corr.pdf',
+       plot = butyrate_energy_corr_plot,
+       width=3,height=3)
+
+hexanoate_energy_corr_plot = ggplot(combined_diet_with_scfa_data %>% filter(acid == 'hexanoate'), aes(x=`Energy (kcal)`, y=concentration)) +
+  geom_point() +
+  stat_smooth(method='lm')+
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/scfa_hexanoate_energy_corr.pdf',
+       plot = hexanoate_energy_corr_plot,
+       width=3,height=3)
+
+```
+
+
+```{r compare_to_16S}
+
+scfa_diet_data = scfa_abundance_df_filtered %>%
+  rownames_to_column(var='qqq_sample') %>%
+  left_join(scfa_maaslin_meta_df %>% rownames_to_column(var='qqq_sample')) %>%
+  mutate(timepoint = as.character(stool_count))
+
+ps_maaslin = readRDS('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/phyloseq_object_for_maaslin.rds')
+tax_table(ps_maaslin)
+
+ramp_ps_trim_genus_glom = readRDS('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/phyloseq_object_trimmed_genus_glom.rds')
+
+# Recode timepoint variable as continuous variable
+df_input_metadata = data.frame(sample_data(ps_maaslin)) %>%
+  mutate(final_grp = as.character(final_grp),
+         timepoint = as.character(timepoint),
+         timepoint_text = case_when(
+           timepoint == 1 ~ 'baseline_2_arm_1',
+           timepoint == 2 ~ 'baseline_arm_1',
+           timepoint == 3 ~ 'week_3_arm_1',
+           timepoint == 4 ~ 'week_6_arm_1',
+           timepoint == 5 ~ 'week_10_arm_1'
+         ),
+         grp_time = paste0(final_grp, '_', timepoint),
+         num_time = case_when(
+           timepoint == 1 ~ -2,
+           timepoint == 2 ~ 0,
+           timepoint == 3 ~ 3,
+           timepoint == 4 ~ 6,
+           timepoint == 5 ~ 10
+         )) %>%
+  rownames_to_column(var='SampleID') %>%
+  left_join(scfa_diet_data, by=c('participant_id'='participant_id', 'timepoint'='timepoint')) %>%
+  column_to_rownames(var='SampleID') %>%
+  filter(timepoint == 2 | timepoint == 4) %>%
+  rename(methylpropionate_2 = `2-methylpropionate`,
+         methylbutyric_3 = `3-methylbutyric`,
+         methylbutyric_2 = `2-methylbutyric`)
+```
+
+
+```{r maaslin2_fiber_microbe}
+# Run Maaslin2
+mas_fiber_microbe <- Maaslin2(
+  input_data = data.frame(otu_table(ps_maaslin)),
+  input_metadata = df_input_metadata,
+  output = "/home/mmcarter/user_data/Projects/RAMP/CLINICALPANEL/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "CLR",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("fiber"),
+  random_effects = c("participant_id"),
+  reference = c('final_grp,Placebo'),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+tax_table(ps_maaslin)
+
+```
+
+
+```{r scfa_microbe}
+# Run Maaslin2
+mas_acetate_microbe <- Maaslin2(
+  input_data = data.frame(otu_table(ps_maaslin)),
+  input_metadata = df_input_metadata,
+  output = "/home/mmcarter/user_data/Projects/RAMP/CLINICALPANEL/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "CLR",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("acetate"),
+  random_effects = c("participant_id"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+# Run Maaslin2
+mas_propionate_microbe <- Maaslin2(
+  input_data = data.frame(otu_table(ps_maaslin)),
+  input_metadata = df_input_metadata,
+  output = "/home/mmcarter/user_data/Projects/RAMP/CLINICALPANEL/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "CLR",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("propionate"),
+  random_effects = c("participant_id"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+# Run Maaslin2
+mas_butyrate_microbe <- Maaslin2(
+  input_data = data.frame(otu_table(ps_maaslin)),
+  input_metadata = df_input_metadata,
+  output = "/home/mmcarter/user_data/Projects/RAMP/CLINICALPANEL/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "CLR",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("butyrate"),
+  random_effects = c("participant_id"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+
+# Run Maaslin2
+mas_methylbutyric_2_microbe <- Maaslin2(
+  input_data = data.frame(otu_table(ps_maaslin)),
+  input_metadata = df_input_metadata,
+  output = "/home/mmcarter/user_data/Projects/RAMP/CLINICALPANEL/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "CLR",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("methylbutyric_2"),
+  random_effects = c("participant_id"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+# Run Maaslin2
+mas_methylbutyric_3_microbe <- Maaslin2(
+  input_data = data.frame(otu_table(ps_maaslin)),
+  input_metadata = df_input_metadata,
+  output = "/home/mmcarter/user_data/Projects/RAMP/CLINICALPANEL/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "CLR",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("methylbutyric_3"),
+  random_effects = c("participant_id"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+# Run Maaslin2
+mas_methylpropionate_2_microbe <- Maaslin2(
+  input_data = data.frame(otu_table(ps_maaslin)),
+  input_metadata = df_input_metadata,
+  output = "/home/mmcarter/user_data/Projects/RAMP/CLINICALPANEL/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "CLR",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("methylpropionate_2"),
+  random_effects = c("participant_id"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+# Run Maaslin2
+mas_hexanoate_microbe <- Maaslin2(
+  input_data = data.frame(otu_table(ps_maaslin)),
+  input_metadata = df_input_metadata,
+  output = "/home/mmcarter/user_data/Projects/RAMP/CLINICALPANEL/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "CLR",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("hexanoate"),
+  random_effects = c("participant_id"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+microbe_scfa_sig_hits = rbind(mas_acetate_microbe$results, mas_propionate_microbe$results) %>%
+  rbind(mas_butyrate_microbe$results) %>%
+  rbind(mas_methylbutyric_2_microbe$results) %>%
+  rbind(mas_methylbutyric_3_microbe$results) %>%
+  rbind(mas_methylpropionate_2_microbe$results) %>%
+  filter(qval < 0.05) %>%
+  select(feature, metadata, coef, qval) %>%
+  left_join(tax_table(ps_maaslin) %>% as.data.frame() %>% rownames_to_column(var='feature')) %>%
+  mutate(metadata = factor(metadata, levels=c('acetate', 'propionate', 'butyrate', 'methylbutyric_2', 'methylbutyric_3', 'methylpropionate_2')))
+
+microby_by_scfa_corr_plot = ggplot(microbe_scfa_sig_hits, aes(x=Genus, y=metadata, size=-log10(qval), color=coef)) +
+  geom_point() +
+  scale_color_distiller(palette="RdBu", limits=c(-1, 1), direction=1) +
+  scale_y_discrete(limits=rev) +
+  theme_bw()
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/scfa_microbe_corr.pdf',
+       microby_by_scfa_corr_plot,
+       width=4, height=2.5)
+  
+```
+
+
+
+```{r}
+summary(lm(concentration_adj ~ `Carbs (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
+summary(lm(concentration_adj ~ `Carbs (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'propionate')))
+summary(lm(concentration_adj ~ `Carbs (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'butyrate')))
+
+
+summary(lm(concentration_adj ~ `Fiber (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
+summary(lm(concentration_adj ~ `Fiber (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'propionate')))
+summary(lm(concentration_adj ~ `Fiber (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'butyrate')))
+
+summary(lm(concentration ~ `Starch (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
+summary(lm(concentration ~ `Starch (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'propionate')))
+summary(lm(concentration ~ `Starch (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'butyrate')))
+
+summary(lm(concentration ~ `Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
+summary(lm(concentration ~ `Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'propionate')))
+summary(lm(concentration ~ `Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'butyrate')))
+
+summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
+summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'propionate')))
+summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'butyrate')))
+summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == '2-methylbutyric')))
+summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == '3-methylbutyric')))
+summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == '2-methylpropionate')))
+summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'pentanoate')))
+summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'hexanoate')))
+summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == '4-methylpentanoate')))
+
+
+summary(lm(concentration ~ `sum_bcaa`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
+
+```
+
+
+```{r }
+# install.packages('statip')
+
+library(statip)
+x <- rnorm(200, 0, 2)
+y <- rnorm(1000, 15, 10)
+hellinger(x, y, -Inf, Inf)
+hellinger(x, y, -Inf, Inf, method = 2)
+```

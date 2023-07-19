@@ -1,0 +1,841 @@
+---
+title: "Untitled"
+output: html_document
+date: '2022-08-23'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(impute)
+```
+
+
+```{r load_metadata}
+
+bifido_responders = read_csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/16S_bifido_responder_status.csv') %>%
+  mutate(participant_id = factor(participant_id))
+
+
+final_participant_list = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_list.csv')
+
+ramp_metadata_df = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv') %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  left_join(bifido_responders)
+
+
+final_participant_timepoint = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_timepoint.csv') 
+
+ramp_metadata_all_timepoints = final_participant_timepoint %>% 
+  rowwise() %>%
+  mutate(participant_id = strsplit(participant_timepoint, '_')[[1]][1],
+         timepoint = strsplit(participant_timepoint, '_')[[1]][2]) %>%
+  left_join(ramp_metadata_df) %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+
+serum_manifest = read_csv('/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAP_TABLES/Serum_Sample_Manifest.csv') %>% 
+  select(SampleID, SubjectID, Timepoint, VisitDate) %>%
+  rename(participant_id = SubjectID, timepoint = Timepoint) %>%
+  rename(SerumID = 1) %>%
+  mutate(participant_id = factor(participant_id)) %>%
+  left_join(ramp_metadata_df)
+```
+
+```{r load_mbx_data}
+plate_map = read_csv('/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAP_TABLES/Serum_Metabolomics_Plate_Map.csv', col_names = T) %>%
+  select(1:4) %>%
+  rename(WellPosition = 3,
+         SerumID = 4)
+
+c18positive_run1_worklist = read_csv('/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAP_TABLES/C18positive_run1_worklist.csv', col_names = F) %>%
+  rename(qtof_sample_name = 1,
+         WellPosition = 2, 
+         Method = 3,
+         MassSpecPath = 4) %>%
+  mutate(RunID = 1)
+c18positive_run2_worklist = read_csv('/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAP_TABLES/C18positive_run2_worklist.csv', col_names = F) %>%
+  rename(qtof_sample_name = 1,
+         WellPosition = 2, 
+         Method = 3,
+         MassSpecPath = 4) %>%
+  mutate(RunID = 2)
+
+c18positive_combined_worklist = rbind(c18positive_run1_worklist, c18positive_run2_worklist)
+
+
+c18positive_meta_map = c18positive_combined_worklist %>%
+  left_join(plate_map, by='WellPosition') %>%
+  left_join(serum_manifest, by='SerumID')
+
+c18p_run1 = read_csv(file = '/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/PEAK_TABLES/210823_RAMP_c18p_run1_peak_area_matrix_annotated.csv') %>%
+  rename(peak_id = 1, 
+         average_rt = 2,
+         average_mz = 3, 
+         metabolite_name = 4, 
+         inchikey = 5,
+         snr_average = 8)
+
+c18p_run1_istds = c18p_run1 %>%
+  filter(internal_standards == 1) %>%
+  filter(inchikey %in% c('IS_BR-PHENYLALANINE', 'IS_D9-CARNITINE', 'IS_D3-METHIONINE', 'IS_D5-HIPPURIC ACID (N-D5-BENZOYLGLYCINE)')) %>%
+  select(-c(2:8)) %>%
+  rename(peak_id = 1) %>%
+  select(-c(`210729_RAMP_serum_c18pos_001`, `210729_RAMP_serum_c18pos_002`, `210729_RAMP_serum_c18pos_003`)) %>%
+  column_to_rownames(var='peak_id') 
+
+c18p_run1_istd_sums = c18p_run1_istds %>%
+  colSums() %>%
+  as.data.frame() %>%
+  rename(istd_sum = 1) %>%
+  rownames_to_column(var='qtof_sample_name')
+
+c18p_run1_no_standards_gathered = c18p_run1 %>%
+  filter(is.na(internal_standards)) %>%
+  filter(keep == 1) %>% 
+  gather(key = 'qtof_sample_name', value='peak_area', -peak_id, -average_rt, -average_mz, -metabolite_name, -inchikey, -internal_standards, -keep, -snr_average) %>%
+  left_join(c18p_run1_istd_sums, by='qtof_sample_name') %>%
+  left_join(c18positive_meta_map, by='qtof_sample_name') %>%
+  filter(WellPosition != 'No Injections') %>%
+  filter(SerumID != 'All Well QC') %>%
+  group_by(RunID, Plate) %>%
+  mutate(mean_istd_by_plate = mean(istd_sum)) %>%
+  group_by(qtof_sample_name) %>%
+  mutate(adjusted_peak_area = peak_area / (istd_sum))
+
+metabolites_run1 = c18p_run1_no_standards_gathered %>%
+  pull(metabolite_name) %>%
+  unique()
+
+
+c18p_run2 = read_csv(file = '/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/PEAK_TABLES/210824_RAMP_c18p_run2_peak_area_matrix_annotated.csv') %>%
+  rename(peak_id = 1, 
+         average_rt = 2,
+         average_mz = 3, 
+         metabolite_name = 4, 
+         inchikey = 5,
+         snr_average = 8) %>%
+  select(-c(`210729_RAMP_serum_c18pos_run2_004`, `210729_RAMP_serum_c18pos_run2_005`))
+
+c18p_run2_istd_sums = c18p_run2 %>% 
+  filter(internal_standards == 1) %>%
+  filter(inchikey %in% c('IS_BR-PHENYLALANINE', 'IS_D9-CARNITINE', 'IS_D3-METHIONINE', 'IS_D5-HIPPURIC ACID (N-D5-BENZOYLGLYCINE)')) %>%
+  select(-c(2:8)) %>%
+  rename(peak_id = 1) %>%
+  column_to_rownames(var='peak_id') %>%
+  colSums() %>%
+  as.data.frame() %>%
+  rename(istd_sum = 1) %>%
+  rownames_to_column(var='qtof_sample_name')
+
+c18p_run2_no_standards_gathered = c18p_run2 %>%
+  filter(is.na(internal_standards)) %>%
+  filter(keep == 1) %>% 
+  gather(key = 'qtof_sample_name', value='peak_area', -peak_id, -average_rt, -average_mz, -metabolite_name, -inchikey, -internal_standards, -keep, -snr_average) %>%
+  left_join(c18p_run2_istd_sums, by='qtof_sample_name') %>%
+  left_join(c18positive_meta_map, by='qtof_sample_name') %>%
+  filter(WellPosition != 'No Injections') %>%
+  filter(SerumID != 'All Well QC') %>%
+  group_by(RunID, Plate) %>%
+  mutate(mean_istd_by_plate = mean(istd_sum)) %>%
+  group_by(qtof_sample_name) %>%
+  mutate(adjusted_peak_area = peak_area / (istd_sum))
+
+metabolites_run2 = c18p_run2_no_standards_gathered %>%
+  pull(metabolite_name) %>%
+  unique()
+
+
+c18positive_gathered_combined = rbind(c18p_run1_no_standards_gathered, c18p_run2_no_standards_gathered) %>%
+  filter(metabolite_name %in% intersect(metabolites_run1, metabolites_run2))
+
+metabolite_map = c18positive_gathered_combined %>%
+  ungroup() %>%
+  select(metabolite_name, inchikey) %>%
+  distinct()
+
+write.csv(metabolite_map, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/metabolite_map.csv', quote=F, row.names=F)
+
+
+c18positive_gathered_combined_cleaned = c18positive_gathered_combined %>%
+  select(participant_id, timepoint, metabolite_name, peak_area) %>%
+  spread(key='metabolite_name', value='peak_area') %>%
+  arrange(participant_id, timepoint) %>%
+  mutate(timepoint = as.character(timepoint),
+         participant_timepoint = paste0(participant_id, '_', timepoint)) %>%
+  ungroup() %>%
+  select(participant_timepoint, everything(), -c(participant_id, timepoint, qtof_sample_name)) 
+```
+
+```{r write_df}
+c18positive_gathered_combined_cleaned_impute = final_participant_timepoint %>%
+  left_join(c18positive_gathered_combined_cleaned) %>%
+  filter(!grepl('_5', participant_timepoint)) %>%
+  filter(!grepl('4011', participant_timepoint)) %>%
+  column_to_rownames(var='participant_timepoint') %>%
+  as.matrix() %>%
+  impute.knn()
+
+metabolomics_top_variance_cols = c18positive_gathered_combined_cleaned_impute$data %>%
+  as.data.frame() %>%
+  summarise_if(is.numeric, var) %>%
+  gather(key='metabolite', value='variance') %>%
+  arrange(desc(variance)) %>%
+  top_frac(1) %>%
+  pull(metabolite)
+
+metabolomics_cleaned = c18positive_gathered_combined_cleaned_impute$data %>%
+  as.data.frame() %>%
+  select(c(metabolomics_top_variance_cols))
+
+metabolomics_cleaned_scaled = metabolomics_cleaned %>%
+  rownames_to_column(var='participant_timepoint') %>%
+  gather(key='metabolite', value='count', -participant_timepoint) %>%
+  mutate(count = log2(count+1)) %>%
+  spread(key='metabolite', value='count') %>%
+  column_to_rownames(var='participant_timepoint') %>%
+  scale() %>%
+  as.data.frame() 
+
+write.csv(metabolomics_cleaned_scaled, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/METABOLOMICS/metabolomics_results_scaled.csv', quote = F, row.names = T)
+
+fold_change_metabolite_by_participant = metabolomics_cleaned %>%
+  rownames_to_column(var='sample_id') %>%
+  filter(grepl('_2', sample_id) | grepl('_4', sample_id)) %>%
+  gather(key='metabolite', value='peak_height', -sample_id) %>%
+  rowwise() %>%
+  mutate(participant_id = strsplit(sample_id, '_')[[1]][1],
+         timepoint = strsplit(sample_id, '_')[[1]][2]) %>%
+  select(-sample_id) %>%
+  spread(key='timepoint', value='peak_height') %>%
+  mutate(logFC = log2(`4`)-log2(`2`+1))
+```
+
+
+```{r run_qc}
+all_sample_tic = c18positive_gathered_combined %>%
+  group_by(qtof_sample_name) %>%
+  filter(is.na(internal_standards)) %>%
+  dplyr::summarise(total_TIC = sum(peak_area)) %>%
+  left_join(c18positive_meta_map, by='qtof_sample_name') %>%
+  mutate(RunID = as.character(RunID))
+
+ggplot(all_sample_tic, aes(x=total_TIC, fill=RunID)) +
+  geom_density(alpha=0.5)
+
+ggplot(all_sample_tic, aes(x=total_TIC, fill=Plate)) +
+  geom_density(alpha=0.5)
+
+
+all_sample_istd_tic = rbind(c18p_run1 %>% gather(key = 'qtof_sample_name', value='peak_area', -peak_id, -average_rt, -average_mz, -metabolite_name, -inchikey, -internal_standards, -keep, -snr_average), c18p_run2 %>% gather(key = 'qtof_sample_name', value='peak_area', -peak_id, -average_rt, -average_mz, -metabolite_name, -inchikey, -internal_standards, -keep, -snr_average)) %>%
+  group_by(qtof_sample_name) %>%
+  filter(internal_standards == 1) %>%
+  dplyr::summarise(total_istd_TIC = sum(peak_area)) %>%
+  left_join(c18positive_meta_map, by='qtof_sample_name') %>%
+  mutate(RunID = as.character(RunID)) %>%
+  filter(WellPosition != 'No Injections') %>%
+  filter(SerumID != 'All Well QC') 
+
+ggplot(all_sample_istd_tic, aes(x=total_istd_TIC, fill=RunID)) +
+  geom_density(alpha=0.5)
+
+ggplot(all_sample_istd_tic, aes(x=total_istd_TIC, fill=Plate)) +
+  geom_density(alpha=0.5)
+
+individual_istd_tic = rbind(c18p_run1 %>% gather(key = 'qtof_sample_name', value='peak_area', -peak_id, -average_rt, -average_mz, -metabolite_name, -inchikey, -internal_standards, -keep, -snr_average), c18p_run2 %>% gather(key = 'qtof_sample_name', value='peak_area', -peak_id, -average_rt, -average_mz, -metabolite_name, -inchikey, -internal_standards, -keep, -snr_average)) %>%
+  group_by(qtof_sample_name) %>%
+  filter(internal_standards == 1) %>%
+  left_join(c18positive_meta_map, by='qtof_sample_name') %>%
+  mutate(RunID = as.character(RunID)) %>%
+  filter(WellPosition != 'No Injections') %>%
+  filter(SerumID != 'All Well QC') 
+
+ggplot(individual_istd_tic, aes(x=peak_area, fill=Plate)) +
+  geom_density(alpha=0.5) +
+  facet_wrap(~inchikey, scales='free')
+
+ggplot(individual_istd_tic, aes(x=peak_area, fill=Plate)) +
+  geom_density(alpha=0.5) +
+  facet_wrap(~inchikey, scales='free')
+
+```
+
+
+```{r maaslin_mbx}
+
+METABOLITES_TO_REMOVE = c('m_c18p_108', 'm_c18p_0503', 'm_c18p_0387', 'm_c18p_0388', 'm_c18p_0337', 'm_c18p_0364', 'm_c18p_0365', 'm_c18p_0158', 'm_c18p_0195', 'm_c18p_0142', 'm_c18p_0369', 'm_c18p_0514', 'm_c18p_0530')
+
+# METABOLITES_TO_REMOVE = c('m_c18p_108')
+
+mbx_abund_matrix = c18positive_gathered_combined %>%
+  mutate(peak_area = log2(peak_area + 1)) %>%
+  filter(timepoint %in% c(1, 2, 3, 4)) %>%
+  filter(!metabolite_name %in% METABOLITES_TO_REMOVE) %>%
+  select(qtof_sample_name, metabolite_name, peak_area) %>%
+  spread(key=metabolite_name, value=peak_area) %>%
+  column_to_rownames(var='qtof_sample_name')
+
+high_abundance_metabs = mbx_abund_matrix %>% 
+  summarise_if(is.numeric, mean) %>%
+  gather(key='metabolite', value='av_count') %>%
+  arrange(desc(av_count)) %>%
+  # filter(av_count > 10000) %>%
+  pull(metabolite)
+
+mbx_abund_matrix = mbx_abund_matrix[, c(high_abundance_metabs)]
+
+mbx_meta_df = c18positive_gathered_combined %>%
+  select(qtof_sample_name, Plate, timepoint, final_grp, participant_id) %>%
+  distinct() %>%
+  left_join(bifido_responders) %>%
+  column_to_rownames(var='qtof_sample_name') %>%
+  mutate(num_time = case_when(
+    timepoint == 1 ~ -2,
+    timepoint == 2 ~ 0,
+    timepoint == 3 ~ 3,
+    timepoint == 4 ~ 6,
+    timepoint == 5 ~ 10
+  )) %>%
+  # filter(timepoint == 2 | timepoint == 4) %>%
+  mutate(final_grp_mod = case_when(
+    final_grp == 'High Dose 2FL' ~ 2,
+    final_grp == 'Low Dose 2FL' ~ 1,
+    TRUE ~ 0
+  ),
+  responder_status_mod = ifelse(responder_status_delta == 'responder', 1, 0),
+  time_grp = final_grp_mod * timepoint,
+  time_responder_grp = responder_status_mod * timepoint,
+  phase = case_when(
+    timepoint == 1 ~ 'Baseline',
+    timepoint == 2 ~ 'Baseline',
+    timepoint == 3 ~ 'Intervention',
+    timepoint == 4 ~ 'Intervention'
+  ),
+  phase_mod = ifelse(phase == 'Intervention', 1, 0),
+  phase_grp = final_grp_mod*phase_mod,
+  phase_responder_grp = responder_status_mod * phase_mod) %>%
+  filter(!is.na(final_grp))
+
+mbx_top_variance_cols = mbx_abund_matrix %>%
+  summarise_if(is.numeric, var) %>%
+  gather(key='metabolite', value='variance') %>%
+  arrange(desc(variance)) %>%
+  top_frac(1) %>%
+  pull(metabolite)
+
+mbx_abund_matrix_filtered = mbx_abund_matrix[row.names(mbx_meta_df), c(mbx_top_variance_cols)] %>%
+  #scale() %>%
+  as.data.frame()
+
+mbx_abund_matrix_rnr_filtered = mbx_abund_matrix[row.names(mbx_meta_df %>% filter(!is.na(responder_status_delta))), c(mbx_top_variance_cols)] %>%
+  scale() %>%
+  as.data.frame()
+mbx_meta_rnr_df = mbx_meta_df %>%
+  filter(!is.na(responder_status_delta))
+
+```
+
+```{r fold_change_test}
+library(limma)
+voom
+
+# mbx_meta_df %>% mutate(final_grp_word = str_replace_all(final_grp, ' ', '_')) %>% pull(final_grp_word)
+
+int_list = interaction(mbx_meta_df$responder_status_delta, mbx_meta_df$phase)
+tg = mbx_meta_df %>% mutate(final_grp_word = str_replace_all(final_grp, ' ', '_')) %>% pull(final_grp_word)
+tg = factor(tg, levels=c('Placebo', 'Low_Dose_2FL', 'High_Dose_2FL'))
+rs = mbx_meta_df$responder_status_delta
+ph = mbx_meta_df$phase
+
+mm = model.matrix(~tg*ph)
+pheatmap(mm)
+
+mbx_abund_matrix_filtered[is.na(mbx_abund_matrix_filtered)] = 0
+mbx_abund_matrix_filtered_renamed = mbx_abund_matrix_filtered %>%
+  rownames_to_column(var='sample_id') %>%
+  ungroup() %>% 
+  mutate(row = row_number()) %>%
+  select(-sample_id) %>%
+  column_to_rownames(var='row') %>% 
+  t()
+
+voom.y.d = voom(mbx_abund_matrix_filtered_renamed, mm, plot=T)
+
+fit = lmFit(voom.y.d, mm, block=participant_id)
+coef.fit = fit$coefficients
+head(coef(fit))
+
+fit <- eBayes(fit)
+anova.res <- topTable(fit, n=Inf) %>%
+  rownames_to_column('metabolite') %>%
+  as.data.frame() %>%
+  arrange(adj.P.Val)
+
+library(multcomp) ##Available from CRAN
+C <- matrix(c(0,0,0,0,0,-1,1,0), 1)
+L3vsL2interaction <- glht(fit, linfct=C)
+summary(L3vsL2interaction)
+# 
+# 
+# contr = makeContrasts(int_listresponder.Intervention-int_listnonresponder.Intervention, levels=colnames(coef(fit)))
+# 
+# tmp = contrasts.fit(fit, contr)
+# tmp = eBayes(tmp)
+# top_table = topTable(tmp, sort.by='P', n=Inf)
+# 
+# coef_deg = coef.fit[rownames(coef.fit) %in% rownames(top_table)[1:4],]
+
+
+```
+
+```{r }
+design <- model.matrix(~0+mbx_meta_df$participant_id)
+design <- cbind(design, X= mbx_meta_df %>% mutate(X = ifelse(final_grp == 'Placebo' & phase == 'Intervention', 1, 0)) %>% pull(X))
+design <- cbind(design, Y= mbx_meta_df %>% mutate(X = ifelse(final_grp == 'Low Dose 2FL' & phase == 'Intervention', 1, 0)) %>% pull(X))
+design <- cbind(design, Z= mbx_meta_df %>% mutate(X = ifelse(final_grp == 'High Dose 2FL' & phase == 'Intervention', 1, 0)) %>% pull(X))
+
+dim(design)
+
+voom.y.d = voom(mbx_abund_matrix_filtered_renamed, design, plot=T)
+
+fit = lmFit(voom.y.d, design)
+coef.fit = fit$coefficients
+head(coef(fit))
+
+fit <- eBayes(fit)
+anova.res <- topTable(fit, n=Inf) %>%
+  rownames_to_column('metabolite') %>%
+  as.data.frame() %>%
+  arrange(adj.P.Val)
+
+
+group <- as.factor(c(1,1,1,2,2,2))
+design <- model.matrix(~0+group)
+contrasts <- makeContrasts(group1-group2, levels=colnames(design)) 
+v <- voom(counts, design)
+fit <- lmFit(v, design)
+fit <- contrasts.fit(fit, contrasts)
+fit <- eBayes(fit)
+topTable(fit)
+```
+
+```{r sam_test}
+# install.packages('samr')
+# library(samr)
+
+# BiocManager::install('siggenes')
+# 
+# library(siggenes)
+
+library(limma)
+
+
+sam_mat = metabolomics_cleaned %>%
+  rownames_to_column(var='sample_id') %>%
+  gather(key='metabolite', value='peak_height', -sample_id) %>%
+  rowwise() %>% 
+  mutate(peak_height = log10(peak_height + 10)) %>% 
+  spread(key='metabolite', value='peak_height') %>%
+  filter(grepl('_2', sample_id) | grepl('_4', sample_id)) %>%
+  rowwise() %>%
+  mutate(participant_id = strsplit(sample_id, '_')[[1]][1]) %>%
+  filter(participant_id %in% (bifido_responders %>% filter(responder_status_delta == 'responder') %>% pull(participant_id)))  %>%
+  select(-participant_id) %>%
+  column_to_rownames(var='sample_id') %>% 
+  t() 
+
+sam_labels = colnames(sam_mat) %>% as.data.frame() %>% rename(sample_id = 1) %>% rowwise() %>% mutate(tp = as.numeric(strsplit(sample_id, '_')[[1]][2]), tp = tp/2) %>% pull(tp)
+
+sam.out = sam(sam_mat, sam_labels,rand=123)
+
+plot(sam.out)
+
+sam.out@p.value %>% 
+  as.data.frame() %>%
+  rownames_to_column(var='sample_id') %>%
+  rename(p = 2) %>%
+  arrange(p)
+
+plot(sam.out, 0.5)
+
+samsum = summary(sam.out, 0.7)
+
+samsum@row.sig.genes
+
+samsum@mat.sig
+```
+
+
+```{r grp_compare_maaslin}
+
+all_groups_mas_metabolomics_grp <- Maaslin2(
+  input_data = mbx_abund_matrix_filtered,
+  input_metadata = mbx_meta_df,
+  output = "/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("final_grp", "phase_grp"),
+  random_effects = c("participant_id"),
+  reference = c("final_grp,Placebo"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+all_groups_mas_metabolomics_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval)
+
+
+## PLACEBO V HIGH DOSE
+placebo_v_highdose_meta = mbx_meta_df %>% 
+  filter(final_grp == 'Placebo' | final_grp == 'High Dose 2FL')
+
+placebo_v_highdose_mbx_abund_matrix_filtered = mbx_abund_matrix_filtered[row.names(placebo_v_highdose_meta), ] 
+
+placebo_v_highdose_mas_metabolomics_grp <- Maaslin2(
+  input_data = placebo_v_highdose_mbx_abund_matrix_filtered,
+  input_metadata = placebo_v_highdose_meta,
+  output = "/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("final_grp", "phase_grp"),
+  random_effects = c("participant_id"),
+  reference = c("final_grp,Placebo"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+placebo_v_highdose_mas_metabolomics_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval)
+
+
+## PLACEBO V LOW DOSE
+placebo_v_lowdose_meta = mbx_meta_df %>% 
+  filter(final_grp == 'Placebo' | final_grp == 'Low Dose 2FL')
+
+placebo_v_lowdose_mbx_abund_matrix_filtered = mbx_abund_matrix_filtered[row.names(placebo_v_lowdose_meta), ] 
+
+placebo_v_lowdose_mas_metabolomics_grp <- Maaslin2(
+  input_data = placebo_v_lowdose_mbx_abund_matrix_filtered,
+  input_metadata = placebo_v_lowdose_meta,
+  output = "/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("final_grp", "phase_grp"),
+  random_effects = c("participant_id"),
+  reference = c("final_grp,Placebo"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+placebo_v_lowdose_mas_metabolomics_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval)
+
+## HIGH DOSE V LOW DOSE
+highdose_v_lowdose_meta = mbx_meta_df %>% 
+  filter(final_grp == 'High Dose 2FL' | final_grp == 'Low Dose 2FL')
+
+highdose_v_lowdose_mbx_abund_matrix_filtered = mbx_abund_matrix_filtered[row.names(highdose_v_lowdose_meta), ] 
+
+highdose_v_lowdose_mas_metabolomics_grp <- Maaslin2(
+  input_data = highdose_v_lowdose_mbx_abund_matrix_filtered,
+  input_metadata = highdose_v_lowdose_meta,
+  output = "/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("final_grp", "phase_grp"),
+  random_effects = c("participant_id"),
+  reference = c("final_grp,Placebo"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+highdose_v_lowdose_mas_metabolomics_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval)
+
+metabolite_map %>% 
+  filter(metabolite_name %in% (highdose_v_lowdose_mas_metabolomics_grp$results %>% filter(metadata == 'phase_grp') %>% filter(qval < 0.2) %>% pull(feature)))
+
+
+```
+
+```{r mbx_volcano_plots}
+
+placebo_v_highdose_volcano = placebo_v_highdose_mas_metabolomics_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval) %>%
+  mutate(group = ifelse(sign(coef) == 1, 'High Dose', 'Placebo')) 
+
+ggplot(placebo_v_highdose_volcano, aes(x=coef, y=-log10(qval))) +
+  geom_hline(yintercept = 1.3, linetype='dashed') +
+  geom_vline(xintercept = 0, linetype='dashed') +
+  geom_point(aes(color=group)) +
+  scale_color_manual(values=c('#5ea1d7', '#939598')) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  guides(color=FALSE)
+
+
+lowdose_v_highdose_volcano = highdose_v_lowdose_mas_metabolomics_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval) %>%
+  mutate(group = ifelse(sign(coef) == 1, 'High Dose', 'Low Dose')) 
+
+ggplot(lowdose_v_highdose_volcano, aes(x=coef, y=-log10(qval))) +
+  geom_hline(yintercept = 1.3, linetype='dashed') +
+  geom_vline(xintercept = 0, linetype='dashed') +
+  geom_point(aes(color=group)) +
+  scale_color_manual(values=c('#5ea1d7', '#b4cce1')) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  guides(color=FALSE) 
+
+```
+
+
+```{r fold_change}
+
+
+mbx_plot_df = mbx_abund_matrix_filtered %>%
+  rownames_to_column(var='sample_id') %>%
+  left_join(mbx_meta_df %>% rownames_to_column(var='sample_id')) %>%
+  gather(key='metabolite', value='count', 2:125) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+mbx_fc_plot = mbx_plot_df %>% 
+  # filter(timepoint == 2 | timepoint == 3) %>%
+  filter(metabolite %in% c('m_c18p_0447', 'm_c18p_0067', 'm_c18p_0009')) %>%
+  ungroup() %>%
+  select(participant_id, final_grp, timepoint, metabolite, count) %>%
+  spread(key='timepoint', value='count') %>%
+  mutate(fc = (`4`+`3`)/2-(`2`+`1`)/2)
+
+wilcox.test(mbx_fc_plot %>% filter(metabolite == 'm_c18p_0067') %>% filter(final_grp == 'High Dose 2FL') %>% pull(fc),
+            mbx_fc_plot %>% filter(metabolite == 'm_c18p_0067') %>% filter(final_grp == 'Placebo') %>% pull(fc))
+
+ggplot(mbx_fc_plot, aes(x=final_grp, y=fc)) +
+  geom_boxplot(aes(fill=final_grp)) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  facet_wrap(~metabolite)
+
+octanoylcarnitine_figure = ggplot(mbx_plot_df %>% filter(metabolite == 'm_c18p_0447'), aes(x=timepoint, y=count)) +
+  geom_boxplot(aes(group=timepoint, fill=final_grp)) +
+  stat_smooth(method='lm') +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  facet_wrap(~final_grp) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ylab('log2(Abundance)') +
+  guides(fill=FALSE) 
+
+summary(lm(count ~ timepoint, mbx_plot_df %>% filter(metabolite == 'm_c18p_0447') %>% filter(final_grp == 'High Dose 2FL')))
+summary(lm(count ~ timepoint, mbx_plot_df %>% filter(metabolite == 'm_c18p_0447') %>% filter(final_grp == 'Low Dose 2FL')))
+summary(lm(count ~ timepoint, mbx_plot_df %>% filter(metabolite == 'm_c18p_0447') %>% filter(final_grp == 'Placebo')))
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/mbx_octanoylcarntine.pdf', plot = octanoylcarnitine_figure, units=c('in'), width=3.5, height=2.5)
+
+wilcox.test(mbx_plot_df %>% filter(metabolite == 'm_c18p_0009') %>% filter(final_grp == 'Low Dose 2FL') %>% filter(phase == 'Baseline') %>% pull(count),
+            mbx_plot_df %>% filter(metabolite == 'm_c18p_0009') %>% filter(final_grp == 'Low Dose 2FL') %>% filter(phase == 'Intervention') %>% pull(count),
+            paired=T)
+
+```
+
+```{r r_vs_nr_maaslin}
+
+mas_metabolomics_rnr <- Maaslin2(
+  input_data = mbx_abund_matrix_filtered,
+  input_metadata = mbx_meta_df,
+  output = "/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.1,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.1,
+  fixed_effects = c("responder_status_delta", "phase_responder_grp"),
+  random_effects = c("participant_id"),
+  reference = c("responder_status_delta,nonresponder"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+r_v_nr_mbx_volcano = mas_metabolomics_rnr$results %>%
+  filter(metadata == 'phase_responder_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval)
+
+metabolite_map = c18positive_gathered_combined %>%
+  ungroup() %>%
+  select(metabolite_name, inchikey) %>%
+  distinct()
+
+
+mbx_rnr_enrichment_volcano = ggplot(r_v_nr_mbx_volcano, aes(x=coef, y=-log10(qval))) +
+  geom_hline(yintercept = 1.0, linetype='dashed') +
+  geom_vline(xintercept = 0, linetype='dashed') +
+  geom_point(aes(color=factor(sign(coef)))) +
+  geom_text(data = mas_metabolomics_rnr$results %>% filter(metadata == 'phase_responder_grp') %>% filter(qval < 0.5), aes(label=feature)) +
+  scale_color_manual(values=c('#d75e65', '#5e65d7')) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  xlim(-0.4, 0.4) +
+  ylim(0, 2.1) +
+  guides(color=FALSE) 
+
+# 
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/mbx_rnr_enrichment_volcano.pdf', plot = mbx_rnr_enrichment_volcano, units=c('in'), width=3.5, height=3.5)
+
+mbx_true_hits = r_v_nr_mbx_volcano %>% filter(qval < 0.1 & metadata == 'phase_responder_grp') %>% nrow()
+
+merged_mbx_df = mbx_abund_matrix_filtered %>%
+  rownames_to_column(var='sample_id') %>%
+  left_join(mbx_meta_df %>% rownames_to_column(var='sample_id'))
+
+ggplot(merged_mbx_df, aes(x=phase, y=m_c18p_0447, group=phase)) +
+  geom_violin(draw_quantiles=c(0.5)) +
+  facet_wrap(~responder_status_delta)
+
+metabolite_map %>% 
+  filter(metabolite_name %in% (mas_metabolomics_rnr$results %>% filter(metadata == 'phase_responder_grp') %>% filter(qval < 0.1) %>% pull(feature)))
+```
+
+```{r shuffle}
+# mbx_num_hits = c()
+for (i in 1:203) {
+  mod_group_shuffle = ramp_metadata_df %>%
+  mutate(mod_group = sample(responder_status_delta)) %>%
+  select(participant_id, mod_group)
+
+mbx_maaslin_meta_shuffle = mbx_meta_df %>%
+  rownames_to_column(var='participant_timepoint') %>%
+  left_join(mod_group_shuffle) %>%
+  mutate(responder_mod_shuff = ifelse(mod_group == 'responder', 1, 0),
+  time_responder_shuff = responder_mod_shuff * timepoint,
+  phase = case_when(
+    timepoint == 1 ~ 'Baseline',
+    timepoint == 2 ~ 'Baseline',
+    timepoint == 3 ~ 'Intervention',
+    timepoint == 4 ~ 'Intervention'
+  ),
+  phase_mod = ifelse(phase == 'Intervention', 1, 0),
+  phase_responder_shuff = responder_mod_shuff * phase_mod) %>%
+  column_to_rownames(var='participant_timepoint')
+
+mas_metabolomics_rnr_shuffle = Maaslin2(
+  input_data = mbx_abund_matrix_filtered,
+  input_metadata = mbx_maaslin_meta_shuffle,
+  output = "/home/mmcarter/user_data/Projects/RAMP/OLINK/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.0,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.1,
+  fixed_effects = c("mod_group", "phase_responder_shuff"),
+  random_effects = c("participant_id"),
+  reference = c('mod_group,nonresponder'),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 4,
+  plot_heatmap = F, plot_scatter = F)
+
+  hits = mas_metabolomics_rnr_shuffle$results %>% filter(metadata == 'phase_responder_shuff') %>%mutate(qval = p.adjust(pval, method='BH')) %>% filter(qval < 0.1) %>% nrow()
+  mbx_num_hits = c(mbx_num_hits, hits)
+
+}
+
+length(mbx_num_hits)
+sig_hits_repeated = mbx_num_hits %>% as.data.frame() %>% rename(num = 1) %>% arrange(desc(num))
+
+x = nrow(sig_hits_repeated %>% filter(num > mbx_true_hits)) / nrow(sig_hits_repeated)
+
+1 - x
+
+simulated_mbx_correlations = ggplot(sig_hits_repeated, aes(x=num)) +
+  geom_histogram(binwidth=1) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  geom_vline(xintercept=6)
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/mbx_simulated_associations_v2.pdf',
+       simulated_mbx_correlations, 
+       height=3, width=4)
+
+```
+
+
+
+```{r corr_plot}
+library(Hmisc)
+library(corrplot)
+library(igraph)
+x = rcorr(as.matrix(mbx_abund_matrix_filtered))
+adjusted_p_mat = x$P %>%
+  as.data.frame() %>%
+  rownames_to_column(var='base') %>%
+  gather(key='compare', value='P', -base) %>%
+  filter(!is.na(P)) %>%
+  mutate(p_adj = p.adjust(P)) %>% 
+  select(-P) %>%
+  spread(key='compare', value='p_adj') %>%
+  column_to_rownames(var='base') %>%
+  as.matrix()
+
+corrplot(cor(olink_results_filtered %>% scale()))
+
+
+x$r[adjusted_p_mat > 0.05] <- 0
+
+# Make an Igraph object from this matrix:
+network <- graph_from_adjacency_matrix(x$r, weighted=T, mode="undirected", diag=F)
+
+E(network)$weight
+
+network <- delete.edges(network, E(network)[ weight < 0.7 ])
+
+E(network)$weight[E(network)$weight <= 0] <- 0.0001
+
+# Basic chart
+plot(delete.vertices(simplify(network), degree(network)==0), layout=layout.fruchterman.reingold, vertex.size=5, vertex.label.cex=0.5)
+
+
+
+```
+
+
+

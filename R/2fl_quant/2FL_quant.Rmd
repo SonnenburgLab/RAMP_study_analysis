@@ -10,6 +10,13 @@ library(tidyverse)
 ```
 
 ```{r metabolon_results}
+final_participant_list = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_list.csv')
+
+ramp_metadata_df = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv') %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  filter(participant_id %in% final_participant_list$participant_id)
+
 metabolon_results = read_csv(file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/2FL_QUANT/2FL_QUANT_metabolon_results.csv') %>%
   mutate(Result = ifelse(Result == 'N/Q', '0', Result)) %>%
   mutate(Result = as.numeric(Result)) %>%
@@ -69,4 +76,51 @@ t.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% filter
        metabolon_results_wide %>% filter(final_grp == 'High Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine))
 t.test(metabolon_results_wide %>% filter(final_grp == 'Placebo') %>% filter(!is.na(Urine)) %>% pull(Urine),
        metabolon_results_wide %>% filter(final_grp == 'High Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine))
+```
+
+```{r covid_deviation_analysis}
+
+metabolon_color_plot_deviation = ggplot(metabolon_results, aes(x=final_grp, y=Result)) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(aes(color=final_grp), size=2) +
+  geom_blank(data = dummy_data) +
+  scale_color_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  facet_wrap(covid_deviation~Matrix, scales='free_y') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  xlab('Treatment Group') +
+  ylab('2FL Concentration (ug/mL)') +
+  guides(color=FALSE, fill=FALSE) 
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/2FL_QUANT_metabolon_boxplot_deviation.pdf',
+       plot = metabolon_color_plot_deviation,
+       width=5, height=5, units=c('in'))
+
+metabolon_results_wide_deviation = metabolon_results %>%
+  select(participant_id, Matrix, Result, final_grp, covid_deviation) %>%
+  group_by(participant_id) %>%
+  spread(key=Matrix, value=Result)
+
+t.test(metabolon_results_wide_deviation %>% filter(final_grp == 'Low Dose 2FL') %>% filter(covid_deviation == TRUE) %>% pull(`EDTA plasma`),
+       metabolon_results_wide_deviation %>% filter(final_grp == 'Placebo') %>% filter(covid_deviation == TRUE) %>% pull(`EDTA plasma`))
+
+t.test(metabolon_results_wide_deviation %>% filter(final_grp == 'Low Dose 2FL') %>% filter(covid_deviation == TRUE) %>% pull(`EDTA plasma`),
+       metabolon_results_wide_deviation %>% filter(final_grp == 'High Dose 2FL') %>% filter(covid_deviation == TRUE) %>% pull(`EDTA plasma`))
+
+t.test(metabolon_results_wide_deviation %>% filter(final_grp == 'Placebo') %>% filter(covid_deviation == TRUE) %>% pull(`EDTA plasma`),
+       metabolon_results_wide_deviation %>% filter(final_grp == 'High Dose 2FL') %>% filter(covid_deviation == TRUE) %>% pull(`EDTA plasma`))
+
+
+t.test(metabolon_results_wide_deviation %>% filter(final_grp == 'Low Dose 2FL') %>% filter(covid_deviation == FALSE) %>% pull(`EDTA plasma`),
+       metabolon_results_wide_deviation %>% filter(final_grp == 'Placebo') %>% filter(covid_deviation == FALSE) %>% pull(`EDTA plasma`))
+
+t.test(metabolon_results_wide_deviation %>% filter(final_grp == 'Low Dose 2FL') %>% filter(covid_deviation == FALSE) %>% pull(`EDTA plasma`),
+       metabolon_results_wide_deviation %>% filter(final_grp == 'High Dose 2FL') %>% filter(covid_deviation == FALSE) %>% pull(`EDTA plasma`))
+
+t.test(metabolon_results_wide_deviation %>% filter(final_grp == 'Placebo') %>% filter(covid_deviation == FALSE) %>% pull(`EDTA plasma`),
+       metabolon_results_wide_deviation %>% filter(final_grp == 'High Dose 2FL') %>% filter(covid_deviation == FALSE) %>% pull(`EDTA plasma`))
+
+
+
 ```

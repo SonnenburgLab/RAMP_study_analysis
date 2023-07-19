@@ -191,7 +191,7 @@ ramp_phyloseq <- phyloseq(otu_table(as.matrix(seqtab.nochim), taxa_are_rows=FALS
                           tax_table(as.matrix(tt)))
 
 
-fitGTR = readRDS(file.path(output_path, "210831_ramp_fitGTR_optim.rds"))
+fitGTR = readRDS(file.path("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/ramp_fitGTR_optim.rds"))
 ramp_phyloseq_with_tree <- phyloseq(otu_table(as.matrix(seqtab.nochim), taxa_are_rows = FALSE),
                                     sample_data(ordered_metadata),
                                     tax_table(as.matrix(tt)),

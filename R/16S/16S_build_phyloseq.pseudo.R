@@ -1,0 +1,199 @@
+
+library(tidyverse)
+library(dada2)
+library(phyloseq)
+
+ramp_metadata_df = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv') %>%
+  mutate(participant_id = factor(participant_id)) 
+
+
+sequencing_run_qc = read_tsv(
+  '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/qc_files/16S_qc_metrics.txt'
+) %>%
+  filter(!grepl('BLANK', `general-samplename`)) %>%
+  filter(!grepl('Mean', `general-samplename`)) %>%
+  mutate(SampleID = paste0('S', `general-samplename`))
+
+read_depth_threshold = 2000
+
+samples_above_threshold = sequencing_run_qc %>%
+  filter(`subsample-rawreads` >= read_depth_threshold) %>%
+  separate(SampleID, into=c('SampleID', 'Well'), sep='[.]', remove=T) %>%
+  pull(SampleID)
+
+samples_below_threshold = sequencing_run_qc %>%
+  filter(`subsample-rawreads` <= read_depth_threshold) %>%
+  separate(SampleID, into=c('SampleID', 'Well'), sep='[.]', remove=T) %>%
+  pull(SampleID)
+
+
+length(samples_above_threshold)
+
+sequencing_run_qc %>%
+  summarise(mean(`subsample-rawreads`),
+            sd(`subsample-rawreads`))
+
+ggplot(sequencing_run_qc, aes(x=`general-projectname`, y=`subsample-rawreads`)) +
+  geom_hline(yintercept=read_depth_threshold) +
+  geom_violin(draw_quantiles = c(0.5)) +
+  theme_bw() +
+  theme(panel.grid = element_blank()) +
+  xlab('') +
+  ylab('Raw reads')
+
+
+ramp_16S_mapping_df = read_csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_16S_sample_key.csv') %>%
+  rowwise() %>%
+  na.omit() %>%
+  mutate(participant_id = as.factor(participant_id),
+         stool_id = as.character(stool_id),
+         timepoint = strsplit(stool_id, '')[[1]][1],
+         timepoint = factor(timepoint, levels=c('1','2','3','4','5')),
+         sample_id = paste0('S', sample_id)) %>%
+  filter(sample_id != 'SNA') %>%
+  left_join(ramp_metadata_df) %>%
+  arrange(sample_id) %>%
+  # These sample IDs are each duplicated in the spreadsheet. We must exclude 
+  # them as we don't know which is which. 
+  filter(!sample_id %in% c('S186', 'S196')) %>%
+  filter(!is.na(timepoint)) %>%
+  column_to_rownames(var='sample_id') %>%
+  arrange(participant_id, timepoint) 
+
+input_path = '/home/mmcarter/user_data/Projects/RAMP/16S/Sonnenburg_Project_005_Merged'
+filt_path = "/home/mmcarter/user_data/Projects/RAMP/16S/02.filtered_fastq"
+output_path = "/home/mmcarter/user_data/Projects/RAMP/16S/03.output"
+save_path = "/home/mmcarter/user_data/Projects/RAMP/16S/03.output"
+
+## Gunzip everything first!!
+
+# Get names of forward and reverse FASTQ files
+fastq_file_list <- sort(list.files(input_path, pattern="fastq"))
+forward_fastq_list <- fastq_file_list[grepl("_R1_", fastq_file_list)]
+reverse_fastq_list <- fastq_file_list[grepl("_R2_", fastq_file_list)]
+
+# Get sample names, assuming files named: R{1,2}_{SAMPLE_NAME}.fastq
+sample_names <- paste0("S", sapply(strsplit(forward_fastq_list, "_"), `[`, 1))
+sample_names <- gsub("SBLANK", "BLANK", x = sample_names)
+
+# Remove sample names that have fewer than 1000 reads, based on previous code chunk. 
+sample_names_length_filtered <- intersect(sample_names, samples_above_threshold)
+
+length(sample_names_length_filtered) 
+
+# Build data frames for forward and reverse sets of FASTQ files.
+forward_fastq_df = as.data.frame(forward_fastq_list) %>%
+  separate(col=forward_fastq_list, into=c('sample_base', 'sample_base_wrong'), sep='_', remove=FALSE) %>%
+  rowwise() %>%
+  mutate(sample_base = paste0("S", sample_base),
+         sample_name = strsplit(sample_base, '[.]')[[1]][1]) %>%
+  filter(sample_name %in% sample_names_length_filtered) %>%
+  mutate(unfilt_path = file.path(input_path, forward_fastq_list)) %>%
+  mutate(filt_path = file.path(filt_path, paste0('R1_', sample_name, "_filtered.fastq")))
+
+reverse_fastq_df = as.data.frame(reverse_fastq_list) %>%
+  separate(col=reverse_fastq_list, into=c('sample_base', 'sample_base_wrong'), sep='_', remove=FALSE) %>%
+  rowwise() %>%
+  mutate(sample_base = paste0("S", sample_base),
+         sample_name = strsplit(sample_base, '[.]')[[1]][1]) %>%
+  filter(sample_name %in% sample_names_length_filtered) %>%
+  mutate(unfilt_path = file.path(input_path, reverse_fastq_list)) %>%
+  mutate(filt_path = file.path(filt_path, paste0('R2_', sample_name, "_filtered.fastq")))
+
+
+# edit and fill in based on looking at quality plots (truncLen)
+plotQualityProfile(forward_fastq_df$unfilt_path[1:4])
+plotQualityProfile(reverse_fastq_df$unfilt_path[1:4])
+
+filtering_results <- filterAndTrim(fwd=forward_fastq_df$unfilt_path, filt=forward_fastq_df$filt_path, 
+                                   rev=reverse_fastq_df$unfilt_path, filt.rev=reverse_fastq_df$filt_path, 
+                                   truncLen=c(240,160), maxEE=c(2,2), compress=TRUE, multithread=TRUE)
+
+# learn forward error rates
+error_forward <- learnErrors(forward_fastq_df$filt_path, nbases = 1e8, multithread=TRUE, randomize=TRUE)
+error_forward_plot = plotErrors(error_forward, nominalQ=TRUE)
+ggsave(filename = file.path(output_path, "220929_error_plot_forward_fastq.pseudo.pdf"))
+
+# learn reverse error rates
+error_reverse <- learnErrors(reverse_fastq_df$filt_path, nbases = 1e8, multithread=TRUE, randomize=TRUE)
+error_reverse_plot = plotErrors(error_reverse, nominalQ=TRUE)
+ggsave(filename = file.path(output_path, "220929_error_plot_reverse_fastq.pseudo.pdf"))
+
+# dereplication
+dereplicated_forward_fastqs <- derepFastq(forward_fastq_df$filt_path)
+dereplicated_reverse_fastqs <- derepFastq(reverse_fastq_df$filt_path)
+# Name the derep-class objects by the sample names
+names(dereplicated_forward_fastqs) <- forward_fastq_df$sample_name
+names(dereplicated_reverse_fastqs) <- reverse_fastq_df$sample_name
+
+# Run DADA2: Sample Inference
+dada_forward <- dada(dereplicated_forward_fastqs, err=error_forward, multithread=TRUE, pool="pseudo", verbose=0,)
+dada_reverse <- dada(dereplicated_reverse_fastqs, err=error_reverse, multithread=TRUE,pool="pseudo", verbose=0)
+
+# Merge paired reads
+merged_pairs <- mergePairs(dada_forward, dereplicated_forward_fastqs, dada_reverse, dereplicated_reverse_fastqs, verbose=FALSE)
+
+# Construct sequence table. Rows are samples, columns are unique 16S sequences.
+seqtab <- makeSequenceTable(merged_pairs)
+
+# Stats for table. 
+dim(seqtab)
+table(nchar(getSequences(seqtab)))
+
+# Remove chimeras
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+
+# Stats for no-chimera table
+dim(seqtab.nochim)
+sum(seqtab.nochim)/sum(seqtab)
+
+# Benchmark
+getN <- function(x) sum(getUniques(x))
+track <- cbind(filtering_results, sapply(dada_forward, getN), sapply(merged_pairs, getN), rowSums(seqtab), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoised", "merged", "tabled", "nonchim")
+rownames(track) <- forward_fastq_df$sample_name
+write.csv(track, file = file.path(output_path, "220929_ramp_benchmarking_stats.pseudo.csv"), quote = F)
+
+# Save cleaned seq table
+saveRDS(seqtab.nochim, file = file.path( output_path, "220929_ramp_seqtab.pseudo.rds"))
+
+seqtab.nochim = readRDS(file.path( output_path, "220929_ramp_seqtab.pseudo.rds"))
+
+# Assign taxonomy
+# Try with silva and get species
+tt <- assignTaxonomy(seqtab.nochim, "/home/mmcarter/R/dada2_files/silva_nr99_v138.1_wSpecies_train_set.fa.gz", multithread=TRUE)
+
+
+
+rownames(ramp_16S_mapping_df)
+ordered_metadata = (ramp_16S_mapping_df)[rownames(seqtab.nochim), ]
+
+ramp_phyloseq <- phyloseq(otu_table(as.matrix(seqtab.nochim), taxa_are_rows=FALSE), 
+                          sample_data(ordered_metadata), 
+                          tax_table(as.matrix(tt)))
+
+
+# fitGTR = readRDS(file.path("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/ramp_fitGTR_optim.rds"))
+# ramp_phyloseq_with_tree <- phyloseq(otu_table(as.matrix(seqtab.nochim), taxa_are_rows = FALSE),
+#                                     sample_data(ordered_metadata),
+#                                     tax_table(as.matrix(tt)),
+#                                     phy_tree(fitGTR$tree))
+
+# 
+saveRDS(ramp_phyloseq, file = file.path(save_path, "220927_ramp_phyloseq_obj.pseudo.rds"))
+# saveRDS(ramp_phyloseq_with_tree, file = file.path(save_path, "220819_ramp_phyloseq_obj_with_tree.rds"))
+
+# ramp_phyloseq = readRDS(file.path(save_path, "211205_ramp_phyloseq_obj.rds"))
+
+
+sample_sums(ramp_phyloseq) %>% mean()
+sample_sums(ramp_phyloseq) %>% sd()
+
+
+
+
+
+
+
+
+

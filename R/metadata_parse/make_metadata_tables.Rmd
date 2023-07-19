@@ -33,6 +33,11 @@ demographic_metadata = read_csv('/home/mmcarter/user_data/Projects/RAMP/METADATA
          participant_id = as.factor(participant_id)) %>%
   select(participant_id, age, gender)
 
+covid_deviations = read_csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_covid_deviation_extra_days.csv') %>%
+  rename(participant_id = 1, covid_deviation_days = 2) %>%
+  mutate(participant_id = as.factor(participant_id),
+         covid_deviation = T)
+
 biobank_to_ppid = read_csv('/home/mmcarter/user_data/Projects/RAMP/METADATA/RAMP_biobank_to_ppid.csv') %>%
   rename(biobank_id = 1,
          participant_id = 2) %>%
@@ -41,13 +46,16 @@ biobank_to_ppid = read_csv('/home/mmcarter/user_data/Projects/RAMP/METADATA/RAMP
 
 # PARTICIPANT METADATA TABLE
 ramp_metadata_df = left_join(treatment_arm_randomization, demographic_metadata) %>%
-  left_join(biobank_to_ppid)
+  left_join(biobank_to_ppid) %>%
+  left_join(covid_deviations) %>%
+  mutate(covid_deviation = ifelse(is.na(covid_deviation), F, covid_deviation))
 
 # WRITE PARTICIPANT METADATA TABLE
 write.csv(ramp_metadata_df, file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv',
           quote = F, sep = ',', row.names = F)
+```
 
-
+```{r stool_manifest}
 stool_manifest = read_csv('/home/mmcarter/user_data/Projects/RAMP/METAGENOMICS/220113_stool_manifest.csv') %>% 
   rename(participant_id = 1,
          visit_date = 2,
@@ -65,4 +73,21 @@ write.csv(stool_manifest, file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_st
           quote = F, sep = ',', row.names = F)
 ```
 
+```{r final_participant_timepoint_list}
+
+final_participant_list = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_list.csv')
+
+final_participant_list %>%
+  mutate(`1` = 1,
+         `2` = 2,
+         `3` = 3,
+         `4` = 4, 
+         `5` = 5) %>%
+  gather(key='timepoint', value='value', -participant_id) %>%
+  arrange(participant_id, timepoint) %>%
+  mutate(participant_timepoint = paste0(participant_id, '_', timepoint)) %>%
+  select(participant_timepoint) %>%
+  write.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_timepoint.csv', row.names = F)
+
+```
 
