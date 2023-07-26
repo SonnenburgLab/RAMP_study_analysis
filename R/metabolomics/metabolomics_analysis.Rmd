@@ -35,6 +35,7 @@ ramp_metadata_all_timepoints = final_participant_timepoint %>%
   mutate(participant_id = factor(participant_id),
          final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
 
+write.csv(ramp_metadata_all_timepoints, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/metabolite_metadata.csv', quote=F, row.names=F)
 
 serum_manifest = read_csv('/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAP_TABLES/Serum_Sample_Manifest.csv') %>% 
   select(SampleID, SubjectID, Timepoint, VisitDate) %>%
@@ -182,13 +183,12 @@ metabolomics_top_variance_cols = c18positive_gathered_combined_cleaned_impute$da
   as.data.frame() %>%
   summarise_if(is.numeric, var) %>%
   gather(key='metabolite', value='variance') %>%
-  arrange(desc(variance)) %>%
-  top_frac(1) %>%
-  pull(metabolite)
+  arrange(desc(variance)) 
 
 metabolomics_cleaned = c18positive_gathered_combined_cleaned_impute$data %>%
-  as.data.frame() %>%
-  select(c(metabolomics_top_variance_cols))
+  as.data.frame() 
+
+write.csv(metabolomics_cleaned, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/METABOLOMICS/metabolomics_results.csv', quote = F, row.names = T)
 
 metabolomics_cleaned_scaled = metabolomics_cleaned %>%
   rownames_to_column(var='participant_timepoint') %>%
@@ -337,135 +337,6 @@ mbx_meta_rnr_df = mbx_meta_df %>%
 
 ```
 
-```{r fold_change_test}
-library(limma)
-voom
-
-# mbx_meta_df %>% mutate(final_grp_word = str_replace_all(final_grp, ' ', '_')) %>% pull(final_grp_word)
-
-int_list = interaction(mbx_meta_df$responder_status_delta, mbx_meta_df$phase)
-tg = mbx_meta_df %>% mutate(final_grp_word = str_replace_all(final_grp, ' ', '_')) %>% pull(final_grp_word)
-tg = factor(tg, levels=c('Placebo', 'Low_Dose_2FL', 'High_Dose_2FL'))
-rs = mbx_meta_df$responder_status_delta
-ph = mbx_meta_df$phase
-
-mm = model.matrix(~tg*ph)
-pheatmap(mm)
-
-mbx_abund_matrix_filtered[is.na(mbx_abund_matrix_filtered)] = 0
-mbx_abund_matrix_filtered_renamed = mbx_abund_matrix_filtered %>%
-  rownames_to_column(var='sample_id') %>%
-  ungroup() %>% 
-  mutate(row = row_number()) %>%
-  select(-sample_id) %>%
-  column_to_rownames(var='row') %>% 
-  t()
-
-voom.y.d = voom(mbx_abund_matrix_filtered_renamed, mm, plot=T)
-
-fit = lmFit(voom.y.d, mm, block=participant_id)
-coef.fit = fit$coefficients
-head(coef(fit))
-
-fit <- eBayes(fit)
-anova.res <- topTable(fit, n=Inf) %>%
-  rownames_to_column('metabolite') %>%
-  as.data.frame() %>%
-  arrange(adj.P.Val)
-
-library(multcomp) ##Available from CRAN
-C <- matrix(c(0,0,0,0,0,-1,1,0), 1)
-L3vsL2interaction <- glht(fit, linfct=C)
-summary(L3vsL2interaction)
-# 
-# 
-# contr = makeContrasts(int_listresponder.Intervention-int_listnonresponder.Intervention, levels=colnames(coef(fit)))
-# 
-# tmp = contrasts.fit(fit, contr)
-# tmp = eBayes(tmp)
-# top_table = topTable(tmp, sort.by='P', n=Inf)
-# 
-# coef_deg = coef.fit[rownames(coef.fit) %in% rownames(top_table)[1:4],]
-
-
-```
-
-```{r }
-design <- model.matrix(~0+mbx_meta_df$participant_id)
-design <- cbind(design, X= mbx_meta_df %>% mutate(X = ifelse(final_grp == 'Placebo' & phase == 'Intervention', 1, 0)) %>% pull(X))
-design <- cbind(design, Y= mbx_meta_df %>% mutate(X = ifelse(final_grp == 'Low Dose 2FL' & phase == 'Intervention', 1, 0)) %>% pull(X))
-design <- cbind(design, Z= mbx_meta_df %>% mutate(X = ifelse(final_grp == 'High Dose 2FL' & phase == 'Intervention', 1, 0)) %>% pull(X))
-
-dim(design)
-
-voom.y.d = voom(mbx_abund_matrix_filtered_renamed, design, plot=T)
-
-fit = lmFit(voom.y.d, design)
-coef.fit = fit$coefficients
-head(coef(fit))
-
-fit <- eBayes(fit)
-anova.res <- topTable(fit, n=Inf) %>%
-  rownames_to_column('metabolite') %>%
-  as.data.frame() %>%
-  arrange(adj.P.Val)
-
-
-group <- as.factor(c(1,1,1,2,2,2))
-design <- model.matrix(~0+group)
-contrasts <- makeContrasts(group1-group2, levels=colnames(design)) 
-v <- voom(counts, design)
-fit <- lmFit(v, design)
-fit <- contrasts.fit(fit, contrasts)
-fit <- eBayes(fit)
-topTable(fit)
-```
-
-```{r sam_test}
-# install.packages('samr')
-# library(samr)
-
-# BiocManager::install('siggenes')
-# 
-# library(siggenes)
-
-library(limma)
-
-
-sam_mat = metabolomics_cleaned %>%
-  rownames_to_column(var='sample_id') %>%
-  gather(key='metabolite', value='peak_height', -sample_id) %>%
-  rowwise() %>% 
-  mutate(peak_height = log10(peak_height + 10)) %>% 
-  spread(key='metabolite', value='peak_height') %>%
-  filter(grepl('_2', sample_id) | grepl('_4', sample_id)) %>%
-  rowwise() %>%
-  mutate(participant_id = strsplit(sample_id, '_')[[1]][1]) %>%
-  filter(participant_id %in% (bifido_responders %>% filter(responder_status_delta == 'responder') %>% pull(participant_id)))  %>%
-  select(-participant_id) %>%
-  column_to_rownames(var='sample_id') %>% 
-  t() 
-
-sam_labels = colnames(sam_mat) %>% as.data.frame() %>% rename(sample_id = 1) %>% rowwise() %>% mutate(tp = as.numeric(strsplit(sample_id, '_')[[1]][2]), tp = tp/2) %>% pull(tp)
-
-sam.out = sam(sam_mat, sam_labels,rand=123)
-
-plot(sam.out)
-
-sam.out@p.value %>% 
-  as.data.frame() %>%
-  rownames_to_column(var='sample_id') %>%
-  rename(p = 2) %>%
-  arrange(p)
-
-plot(sam.out, 0.5)
-
-samsum = summary(sam.out, 0.7)
-
-samsum@row.sig.genes
-
-samsum@mat.sig
-```
 
 
 ```{r grp_compare_maaslin}
@@ -516,7 +387,7 @@ placebo_v_highdose_mas_metabolomics_grp <- Maaslin2(
   standardize = TRUE,
   cores = 1)
 
-placebo_v_highdose_mas_metabolomics_grp$results %>%
+placebo_v_highdose_mas_metabolomics_grp_results = placebo_v_highdose_mas_metabolomics_grp$results %>%
   filter(value == 'phase_grp') %>%
   mutate(qval = p.adjust(pval, method='BH')) %>%
   arrange(qval, pval)
@@ -545,7 +416,7 @@ placebo_v_lowdose_mas_metabolomics_grp <- Maaslin2(
   standardize = TRUE,
   cores = 1)
 
-placebo_v_lowdose_mas_metabolomics_grp$results %>%
+placebo_v_lowdose_mas_metabolomics_grp_results = placebo_v_lowdose_mas_metabolomics_grp$results %>%
   filter(value == 'phase_grp') %>%
   mutate(qval = p.adjust(pval, method='BH')) %>%
   arrange(qval, pval)
@@ -573,7 +444,7 @@ highdose_v_lowdose_mas_metabolomics_grp <- Maaslin2(
   standardize = TRUE,
   cores = 1)
 
-highdose_v_lowdose_mas_metabolomics_grp$results %>%
+highdose_v_lowdose_mas_metabolomics_grp_results = highdose_v_lowdose_mas_metabolomics_grp$results %>%
   filter(value == 'phase_grp') %>%
   mutate(qval = p.adjust(pval, method='BH')) %>%
   arrange(qval, pval)
@@ -581,7 +452,16 @@ highdose_v_lowdose_mas_metabolomics_grp$results %>%
 metabolite_map %>% 
   filter(metabolite_name %in% (highdose_v_lowdose_mas_metabolomics_grp$results %>% filter(metadata == 'phase_grp') %>% filter(qval < 0.2) %>% pull(feature)))
 
+metabolomics_regression_results = placebo_v_highdose_mas_metabolomics_grp_results %>%
+  select(feature, coef, stderr, pval, qval) %>%
+  left_join(placebo_v_lowdose_mas_metabolomics_grp_results %>% select(feature, coef, stderr, pval, qval), by='feature') %>%
+  left_join(highdose_v_lowdose_mas_metabolomics_grp_results %>% select(feature, coef, stderr, pval, qval), by='feature') %>% 
+  left_join(metabolite_map, by=c('feature'='metabolite_name')) %>% 
+  select(inchikey, everything(), -c(feature)) %>% 
+  rename(metabolite = inchikey)
 
+
+write.table(metabolomics_regression_results, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/METABOLOMICS/metabolomics_regression_results.tsv', sep='\t', quote = F, row.names = T)
 ```
 
 ```{r mbx_volcano_plots}

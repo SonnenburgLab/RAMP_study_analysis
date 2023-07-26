@@ -34,6 +34,8 @@ ramp_metadata_all_timepoints = final_participant_timepoint %>%
   mutate(participant_id = factor(participant_id),
          final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
 
+write.csv(ramp_metadata_all_timepoints, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/olink_metadata.csv', quote = F, row.names = T)
+
 
 ramp_metadata_df %>% 
   filter(covid_deviation == TRUE) %>%
@@ -74,12 +76,7 @@ olink_results_merged.impute = olink_results_merged %>%
 olink_results_cleaned = olink_results_merged.impute$data %>%
   as.data.frame() 
 
-top_var_cytos = olink_results_cleaned %>%
-  summarise_if(is.numeric, var) %>%
-  gather(key='cyto', value='var') %>%
-  arrange(desc(var)) %>%
-  # top_frac(0.75) %>%
-  pull(cyto)
+write.csv(olink_results_cleaned, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/OLINK/olink_results.csv', quote = F, row.names = T)
 
 olink_results_cleaned_scaled = olink_results_cleaned %>%
   scale() %>%
@@ -137,7 +134,7 @@ mas_treatment_grp <- Maaslin2(
   transform = "NONE",
   analysis_method = "LM",
   max_significance = 0.05,
-  fixed_effects = c("final_grp", "phase_grp"),
+  fixed_effects = c("final_grp", "timepoint", "phase_grp"),
   random_effects = c("participant_id"),
   reference = c('final_grp,Placebo'),
   correction = "BH",
@@ -145,7 +142,7 @@ mas_treatment_grp <- Maaslin2(
   cores = 1)
 
 mas_treatment_grp$results %>%
-  filter(value == 'phase_grp') %>%
+  # filter(value == 'phase_grp') %>%
   mutate(qval = p.adjust(pval, method='BH')) %>%
   arrange(qval, pval)
 
@@ -173,7 +170,7 @@ placebo_v_highdose_mas_treatment_grp <- Maaslin2(
   standardize = FALSE,
   cores = 1)
 
-placebo_v_highdose_mas_treatment_grp$results %>%
+placebo_v_highdose_mas_treatment_grp_results = placebo_v_highdose_mas_treatment_grp$results %>%
   filter(value == 'phase_grp') %>%
   mutate(qval = p.adjust(pval, method='BH')) %>%
   arrange(qval, pval)
@@ -201,7 +198,7 @@ placebo_v_lowdose_mas_treatment_grp <- Maaslin2(
   standardize = FALSE,
   cores = 1)
 
-placebo_v_lowdose_mas_treatment_grp$results %>%
+placebo_v_lowdose_mas_treatment_grp_results = placebo_v_lowdose_mas_treatment_grp$results %>%
   filter(value == 'phase_grp') %>%
   mutate(qval = p.adjust(pval, method='BH')) %>%
   arrange(qval, pval)
@@ -230,11 +227,18 @@ highdose_v_lowdose_mas_treatment_grp <- Maaslin2(
   standardize = FALSE,
   cores = 1)
 
-highdose_v_lowdose_mas_treatment_grp$results %>%
+highdose_v_lowdose_mas_treatment_grp_results = highdose_v_lowdose_mas_treatment_grp$results %>%
   filter(value == 'phase_grp') %>%
   mutate(qval = p.adjust(pval, method='BH')) %>%
   arrange(qval, pval)
 
+
+olink_regression_results = placebo_v_highdose_mas_treatment_grp_results %>%
+  select(feature, coef, stderr, pval, qval) %>%
+  left_join(placebo_v_lowdose_mas_treatment_grp_results %>% select(feature, coef, stderr, pval, qval), by='feature') %>%
+  left_join(highdose_v_lowdose_mas_treatment_grp_results %>% select(feature, coef, stderr, pval, qval), by='feature')
+
+write.csv(olink_regression_results, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/OLINK/olink_regression_results.csv', quote = F, row.names = T)
 ```
 
 
