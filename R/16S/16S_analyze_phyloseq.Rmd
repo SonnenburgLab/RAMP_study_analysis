@@ -18,6 +18,11 @@ library(coda)
 library(CoDaSeq)
 library(microbiome)
 
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("phyloseq")
+
 select <- dplyr::select
 ```
 
@@ -66,15 +71,17 @@ ramp_ps_trim = filter_taxa(ramp_phyloseq, function(x) sum(x >= 1) > (0.10*length
 taxa_names(ramp_ps_trim) <- paste0("OTU.", seq(ntaxa(ramp_ps_trim)))
 
 phyloseq_write_path = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S'
-write.csv(as.data.frame(otu_table(ramp_ps_trim)),
-          file = paste(phyloseq_write_path, 'ramp_phyloseq_object_otu.csv', sep='/'),
-          quote = F)
-write.csv(as.data.frame(sample_data(ramp_ps_trim)),
-          file = paste(phyloseq_write_path, 'ramp_phyloseq_object_samples.csv', sep='/'),
-          quote = F)
-write.csv(as.data.frame(tax_table(ramp_ps_trim)),
-          file = paste(phyloseq_write_path, 'ramp_phyloseq_object_taxonomy.csv', sep='/'),
-          quote = F)
+
+
+# write.csv(as.data.frame(otu_table(ramp_ps_trim)),
+#           file = paste(phyloseq_write_path, 'ramp_phyloseq_object_otu.csv', sep='/'),
+#           quote = F)
+# write.csv(as.data.frame(sample_data(ramp_ps_trim)),
+#           file = paste(phyloseq_write_path, 'ramp_phyloseq_object_samples.csv', sep='/'),
+#           quote = F)
+# write.csv(as.data.frame(tax_table(ramp_ps_trim)),
+#           file = paste(phyloseq_write_path, 'ramp_phyloseq_object_taxonomy.csv', sep='/'),
+#           quote = F)
 
 taxa_names(ramp_ps_trim) <- paste0("OTU.", seq(ntaxa(ramp_ps_trim)))
 
@@ -201,7 +208,7 @@ phyloseq_cleaned_scaled = phyloseq_cleaned.imputed$data %>%
   as.data.frame() %>%
   rename_with(~paste0("microbiome_", .), names(.))
 
-write.csv(phyloseq_cleaned_scaled, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/phyloseq_16S_results_scaled.csv', quote = F, row.names = T)
+# write.csv(phyloseq_cleaned_scaled, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/phyloseq_16S_results_scaled.csv', quote = F, row.names = T)
 ```
 
 ```{r beta_diversity}
@@ -554,7 +561,7 @@ bifido_responders %>%
   group_by(responder_status_delta, final_grp) %>%
   dplyr::summarise(n())
 
-write.csv(bifido_responders, file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/16S_bifido_responder_status.csv', quote = F, row.names = F)
+# write.csv(bifido_responders, file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/16S_bifido_responder_status.csv', quote = F, row.names = F)
 
 wilcox.test(bifido_responders %>% filter(final_grp == 'Placebo') %>% pull(delta_2_3),
             bifido_responders %>% filter(final_grp == 'High Dose 2FL') %>% pull(delta_2_3), na.rm = T)
@@ -579,7 +586,7 @@ bifido_abund_change_with_color = ggplot(bifido_responders %>% mutate(final_grp =
   scale_y_continuous(limits=c(-0.12, 0.2), breaks=c(-0.1, 0, 0.1, 0.2), labels=c('-10', '0', '10', '20')) +
   guides(color=FALSE)
 
-ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifido_abund_change_with_color.pdf', plot = bifido_abund_change_with_color, units=c('in'), width=4, height=3)
+# ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifido_abund_change_with_color.pdf', plot = bifido_abund_change_with_color, units=c('in'), width=4, height=3)
 
 bifido_responder_at_baseline = ggplot(bifido_responders, aes(x=responder_status_delta, y=bifido_abund_2)) +
   geom_boxplot(aes(fill=responder_status_delta)) +
@@ -592,7 +599,7 @@ bifido_responder_at_baseline = ggplot(bifido_responders, aes(x=responder_status_
   scale_y_continuous(limits=c(0, 0.32), breaks=c(0, 0.1, 0.2, 0.3), labels=c('0', '10', '20', '30')) +
   guides(fill=FALSE)
 # 
-ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifido_responder_baseline.pdf', plot = bifido_responder_at_baseline, units=c('in'), width=2.5, height=3.5)
+# ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifido_responder_baseline.pdf', plot = bifido_responder_at_baseline, units=c('in'), width=2.5, height=3.5)
 
 wilcox.test(bifido_responders %>% filter(responder_status_delta == 'responder') %>% pull(bifido_abund_2),
             bifido_responders %>% filter(responder_status_delta == 'nonresponder') %>% pull(bifido_abund_2))
@@ -613,7 +620,10 @@ bifido_responder_plasma_levels = ggplot(bifido_responders, aes(x=responder_statu
 wilcox.test(bifido_responders %>% filter(responder_status_delta == 'responder') %>% pull(EDTA_plasma),
             bifido_responders %>% filter(responder_status_delta == 'nonresponder') %>% pull(EDTA_plasma))
 
-ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifido_responder_plasma_levels.pdf', plot = bifido_responder_plasma_levels, units=c('in'), width=2.5, height=3.5)
+# gsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifido_responder_plasma_levels.pdf', plot = bifido_responder_plasma_levels, units=c('in'), width=2.5, height=3.5)
+
+
+bifido_responders
 ```
 
 
@@ -683,8 +693,8 @@ alpha_diversity_covid_deviations = ggplot(ramp_metadata_with_diversity_df, aes(x
   guides(fill=FALSE) +
   facet_wrap(~covid_deviation)
 
-ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_alpha_diversity_covid_deviations.pdf',
-       alpha_diversity_covid_deviations, width=10, height=4, units = c('in'))
+# ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_alpha_diversity_covid_deviations.pdf',
+#        alpha_diversity_covid_deviations, width=10, height=4, units = c('in'))
 
 
 
@@ -713,8 +723,8 @@ bifido_abundance_covid_deviations = ggplot(taxa_of_interest, aes(x=timepoint, y=
   guides(fill=FALSE) +
   facet_wrap(~covid_deviation)
 
-ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifidobacterium_abund_covid_deviations.pdf',
-       bifido_abundance_covid_deviations, width=10, height=4, units = c('in'))
+# ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifidobacterium_abund_covid_deviations.pdf',
+#        bifido_abundance_covid_deviations, width=10, height=4, units = c('in'))
 
 wilcox.test(taxa_of_interest %>% filter(covid_deviation == TRUE) %>% filter(treatment_grp == '93') %>% filter(timepoint == 3) %>% pull(OTU_abund),
             taxa_of_interest %>% filter(covid_deviation == TRUE) %>% filter(treatment_grp == '92') %>% filter(timepoint == 3) %>% pull(OTU_abund))

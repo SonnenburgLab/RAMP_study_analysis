@@ -7,8 +7,11 @@ date: '2022-11-21'
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
+library(car)
 ```
 
+
+## Load metadata
 
 ```{r metadata}
 
@@ -39,6 +42,8 @@ ramp_metadata_all_timepoints = final_participant_timepoint %>%
          final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
 
 ```
+
+## Load questionnaire data
 
 ```{r questionnaire_data}
 cog_abilities_results = read_csv('/home/mmcarter/user_data/Projects/RAMP/QUESTIONNAIRES/RAMP_PROMISV10AppliedCognAbilitiesQuestionnaire_RawDATA.csv') %>%
@@ -98,49 +103,7 @@ stress_results = read_csv('/home/mmcarter/user_data/Projects/RAMP/QUESTIONNAIRES
 
 ```
 
-
-```{r tscore_conversion}
-
-convert_to_t_score = function(input_score) {
-  if(input_score == 4) {
-    return(30.1)
-  } else if (input_score == 5) {
-    return(34.6)
-  } else if (input_score == 6) {
-    return(36.6)
-  } else if (input_score == 7) {
-    return(38.2)
-  } else if (input_score == 8) {
-    return(39.5)
-  } else if (input_score == 9) {
-    return(40.8)
-  } else if (input_score == 10) {
-    return(42.2)
-  } else if (input_score == 11) {
-    return(43.5)
-  } else if (input_score == 12) {
-    return(44.9)
-  } else if (input_score == 13) {
-    return(46.4)
-  } else if (input_score == 14) {
-    return(48.0)
-  } else if (input_score == 15) {
-    return(49.7)
-  } else if (input_score == 16) {
-    return(51.4)
-  } else if (input_score == 17) {
-    return(53.2)
-  } else if (input_score == 18) {
-    return(55.2)
-  } else if (input_score == 19) {
-    return(57.8)
-  } else if (input_score == 20) {
-    return(63.8)
-  }
-}
-
-
-```
+## Run stats
 
 ```{r }
 all_questionnaires = rbind(cog_abilities_results, gi_symptoms_results) %>%
@@ -183,88 +146,40 @@ data.frame(p_vals) %>%
   mutate(p_adj = p.adjust(pval, method='BH')) %>%
   arrange(pval)
 
+```
 
-ggplot(all_questionnaires %>% filter(question == 'pr_cog_memory'), aes(x=baseline_1_arm_1, y=week_6_arm_1, color=final_grp)) +
-  geom_point() +
-  stat_smooth(method='lm')
+## Plot GI results
+
+```{r plot_gi_results}
+gi_results_for_plotting = gi_symptoms_results %>% 
+  filter(question %in% c('gi1', 'gi5', 'gi7', 'gi9', 'gi13', 'gi16')) %>%
+  select(participant_id, question, baseline_1_arm_1, week_6_arm_1, final_grp) %>%
+  gather(key='timepoint', value='score', -participant_id, -question, -final_grp) %>%
+  mutate(timepoint = ifelse(timepoint == 'baseline_1_arm_1', 'Baseline', 'End')) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  mutate(question = case_when(
+    question == 'gi1' ~ 'Abdominal pains',
+    question == 'gi13' ~ 'Bristol Stool Score',
+    question == 'gi16' ~ 'Number of bowel movements daily',
+    question == 'gi5' ~ 'Nausea and vomiting',
+    question == 'gi7' ~ 'Abdominal distension',
+    question == 'gi9' ~ 'Flatulence' 
+  ))
 
 
-cog_memory_plot = ggplot(all_questionnaires_gathered_results %>% filter(question == 'pr_cog_memory'), aes(x=timepoint, y=value, fill=final_grp)) +
+ggplot(gi_results_for_plotting, aes(x=timepoint, y=score, fill=final_grp)) +
   geom_violin(draw_quantiles=c(0.5)) +
-  scale_x_discrete(labels=c('Baseline', 'End')) +
-  scale_fill_manual(name='Treatment Group', values=c('#939598', '#b4cce1', '#5ea1d7')) + 
-  ylab('Survey Response') +
+  facet_wrap(~question) +
+  scale_fill_manual(name = 'Treatment Group', values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  ylab('Score') +
   xlab('Timepoint') +
-  theme_bw() + 
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  ggtitle('Normalized cognitive scores')
-
-
-wilcox.test(all_questionnaires_gathered_results %>% filter(treatment_grp == '93' & timepoint == 'week_6_arm_1' & question == 'pr_cog_memory') %>% pull(value),
-            all_questionnaires_gathered_results %>% filter(treatment_grp == '93' & timepoint == 'baseline_1_arm_1' & question == 'pr_cog_memory') %>% pull(value),
-            paired=T)
+  theme_classic()
 ```
 
 
-```{r bifido_responders}
-all_questionnaires_results_with_bifido = all_questionnaires %>%
-  left_join(bifido_responders) %>%
-  filter(!is.na(responder_status_delta)) %>%
-  filter(grepl('pr_', question))
+## CANTAB tests
 
-
-questionnaire_bifido_anova_fxn = function(q) {
-  print(q)
-  ancova_df = all_questionnaires_results_with_bifido %>%
-    filter(question == q)
-  tryCatch(
-    expr = {
-        aov.mod = aov(week_6_arm_1 ~ baseline_1_arm_1 + responder_status_delta, ancova_df)
-  aov_res = Anova(aov.mod, type="III")
-  return(aov_res$`Pr(>F)`[[3]])  
-    },
-  error = function(e) {
-    return(1)
-  }
-  )
-
-}
-
-
-p_vals = lapply(pr_questions, questionnaire_bifido_anova_fxn)
-names(p_vals) = pr_questions 
-
-data.frame(p_vals) %>% 
-  gather(key='question', value='pval') %>%
-  filter(!grepl('complete', question)) %>%
-  mutate(p_adj = p.adjust(pval, method='fdr')) %>%
-  arrange(pval)
-
-
-pr_cog_agg_score = all_questionnaires_gathered_results_with_bifido %>% 
-  filter(question == 'pr_cog_raw_score') %>% 
-  rowwise() %>% 
-  mutate(t_score = convert_to_t_score(value))
-
-ggplot(pr_cog_agg_score, aes(x=timepoint, y=value, fill=responder_status_delta)) +
-  geom_violin(draw_quantiles=c(0.5)) +
-  scale_x_discrete(labels=c('Baseline', 'End')) +
-  scale_fill_manual(name = 'Responder Status', values=c('#d75e65', '#5e65d7')) +
-  ylab('Survey Response') +
-  xlab('Timepoint') +
-  theme_bw() + 
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) 
-
-wilcox.test(pr_cog_agg_score %>% filter(responder_status_delta == 'responder') %>% filter(timepoint == 'baseline_1_arm_1') %>% pull(value),
-            pr_cog_agg_score %>% filter(responder_status_delta == 'responder') %>% filter(timepoint == 'week_6_arm_1') %>% pull(value),
-            paired=T)
-
-wilcox.test(pr_cog_agg_score %>% filter(responder_status_delta == 'nonresponder') %>% filter(timepoint == 'baseline_1_arm_1') %>% pull(value),
-            pr_cog_agg_score %>% filter(responder_status_delta == 'responder') %>% filter(timepoint == 'baseline_1_arm_1') %>% pull(value))
-```
-
+### Load CANTAB data
 
 ```{r CANTAB}
 cantab_results = read_csv('/home/mmcarter/user_data/Projects/RAMP/QUESTIONNAIRES/RowBySessionNorms_RAMP-2_phi-free.csv') %>%
@@ -290,22 +205,11 @@ cantab_results %>% pull(test_type) %>% unique()
 ```
 
 
+### RVPA test
+
 ```{r rvpa}
 cantab_results_filtered = cantab_results %>%
     filter(test_type == 'RVPAPercentile')
-
-ggplot(cantab_results_filtered %>% filter(timepoint == 'Week 6' | timepoint == 'Week -2'), aes(x=timepoint, y=result, fill=final_grp)) +
-  geom_violin(draw_quantiles=c(0.5)) +
-  geom_point(aes(group=participant_id),size=2, alpha=0.7) +
-  geom_line(aes(group=participant_id), alpha=0.7) +
-  facet_wrap(~final_grp) +
-  ylab('RVPA Percentile Score') +
-  # scale_y_continuous(limits = c(0, 120), breaks=c(0, 25, 50, 75, 100)) +
-  theme_bw() +
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_fill_manual(name = 'Treatment Group', values=c('#939598', '#b4cce1', '#5ea1d7')) +
-  xlab('Timepoint')
 
 cantab_baseline_end_spread = cantab_results_filtered %>%
   filter(timepoint %in% c('Week -2', 'Week 6')) %>%
@@ -315,35 +219,6 @@ cantab_baseline_end_spread = cantab_results_filtered %>%
   rowwise() %>%
   mutate(treatment_grp_mod = ifelse(treatment_grp == '92', 'placebo', 'treatment'))
 
-wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '91') %>% pull(pre),
-            cantab_baseline_end_spread %>% filter(treatment_grp == '91') %>% pull(post), paired=TRUE)
-
-wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '92') %>% pull(pre),
-            cantab_baseline_end_spread %>% filter(treatment_grp == '92') %>% pull(post), paired=TRUE)
-
-wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '93') %>% pull(pre),
-            cantab_baseline_end_spread %>% filter(treatment_grp == '93') %>% pull(post), paired=TRUE)
-
-ggplot(cantab_results_filtered, aes(x=timepoint, y=result, fill=responder_status_delta)) +
-  geom_violin(draw_quantiles=c(0.5)) +
-  geom_point(aes(group=participant_id),size=2, alpha=0.7) +
-  geom_line(aes(group=participant_id), alpha=0.7) +
-  facet_wrap(~responder_status_delta) +
-  ylab('RVPA Percentile Score') +
-  theme_bw() +
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_fill_manual(name = 'Responder Status', values=c('#d75e65', '#5e65d7')) +
-  # scale_y_continuous(limits = c(0, 120), breaks=c(0, 25, 50, 75, 100)) +
-  xlab('Timepoint')
-
-
-t.test(cantab_baseline_end_spread %>% filter(responder_status_delta == 'responder') %>% pull(pre),
-            cantab_baseline_end_spread %>% filter(responder_status_delta == 'responder') %>% pull(post), paired=TRUE)
-
-
-t.test(cantab_baseline_end_spread %>% filter(responder_status_delta == 'nonresponder') %>% pull(pre),
-            cantab_baseline_end_spread %>% filter(responder_status_delta == 'nonresponder') %>% pull(post), paired=TRUE)
 
 cantab_baseline_end_spread = cantab_results_filtered %>%
   filter(timepoint %in% c('Week -2', 'Week 6')) %>%
@@ -395,32 +270,14 @@ aov.mod = aov(post ~ pre + responder_status_delta, cantab_baseline_end_spread %>
 Anova(aov.mod, type="III")
 
 
-wilcox.test(cantab_results_filtered %>% filter(timepoint == 'Week -2') %>% filter(responder_status_delta == 'responder') %>% pull(result),
-            cantab_results_filtered %>% filter(timepoint == 'Week -2') %>% filter(responder_status_delta == 'nonresponder') %>% pull(result))
-
-wilcox.test(cantab_results_filtered %>% filter(timepoint == 'Week 6') %>% filter(responder_status_delta == 'responder') %>% pull(result),
-            cantab_results_filtered %>% filter(timepoint == 'Week 6') %>% filter(responder_status_delta == 'nonresponder') %>% pull(result))
 
 ```
 
-
+### PAL test
 
 ```{r pal}
 cantab_results_filtered = cantab_results %>%
     filter(test_type == 'PALTEA28Percentile')
-
-ggplot(cantab_results_filtered %>% filter(timepoint == 'Week 6' | timepoint == 'Week -2'), aes(x=timepoint, y=result, fill=final_grp)) +
-  geom_violin(draw_quantiles=c(0.5)) +
-  geom_point(aes(group=participant_id),size=2, alpha=0.7) +
-  geom_line(aes(group=participant_id), alpha=0.7) +
-  facet_wrap(~final_grp) +
-  ylab('RVPA Percentile Score') +
-  # scale_y_continuous(limits = c(0, 120), breaks=c(0, 25, 50, 75, 100)) +
-  theme_bw() +
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_fill_manual(name = 'Treatment Group', values=c('#939598', '#b4cce1', '#5ea1d7')) +
-  xlab('Timepoint')
 
 cantab_baseline_end_spread = cantab_results_filtered %>%
   filter(timepoint %in% c('Week -2', 'Week 6')) %>%
@@ -430,35 +287,6 @@ cantab_baseline_end_spread = cantab_results_filtered %>%
   rowwise() %>%
   mutate(treatment_grp_mod = ifelse(treatment_grp == '92', 'placebo', 'treatment'))
 
-wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '91') %>% pull(pre),
-            cantab_baseline_end_spread %>% filter(treatment_grp == '91') %>% pull(post), paired=TRUE)
-
-wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '92') %>% pull(pre),
-            cantab_baseline_end_spread %>% filter(treatment_grp == '92') %>% pull(post), paired=TRUE)
-
-wilcox.test(cantab_baseline_end_spread %>% filter(treatment_grp == '93') %>% pull(pre),
-            cantab_baseline_end_spread %>% filter(treatment_grp == '93') %>% pull(post), paired=TRUE)
-
-ggplot(cantab_results_filtered, aes(x=timepoint, y=result, fill=responder_status_delta)) +
-  geom_violin(draw_quantiles=c(0.5)) +
-  geom_point(aes(group=participant_id),size=2, alpha=0.7) +
-  geom_line(aes(group=participant_id), alpha=0.7) +
-  facet_wrap(~responder_status_delta) +
-  ylab('RVPA Percentile Score') +
-  theme_bw() +
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank()) +
-  scale_fill_manual(name = 'Responder Status', values=c('#d75e65', '#5e65d7')) +
-  # scale_y_continuous(limits = c(0, 120), breaks=c(0, 25, 50, 75, 100)) +
-  xlab('Timepoint')
-
-
-t.test(cantab_baseline_end_spread %>% filter(responder_status_delta == 'responder') %>% pull(pre),
-            cantab_baseline_end_spread %>% filter(responder_status_delta == 'responder') %>% pull(post), paired=TRUE)
-
-
-t.test(cantab_baseline_end_spread %>% filter(responder_status_delta == 'nonresponder') %>% pull(pre),
-            cantab_baseline_end_spread %>% filter(responder_status_delta == 'nonresponder') %>% pull(post), paired=TRUE)
 
 cantab_baseline_end_spread = cantab_results_filtered %>%
   filter(timepoint %in% c('Week -2', 'Week 6')) %>%
@@ -509,10 +337,5 @@ Anova(aov.mod, type="III")
 aov.mod = aov(post ~ pre + responder_status_delta, cantab_baseline_end_spread %>% filter(!is.na(responder_status_delta)))
 Anova(aov.mod, type="III")
 
-wilcox.test(cantab_results_filtered %>% filter(timepoint == 'Week -2') %>% filter(responder_status_delta == 'responder') %>% pull(result),
-            cantab_results_filtered %>% filter(timepoint == 'Week -2') %>% filter(responder_status_delta == 'nonresponder') %>% pull(result))
-
-wilcox.test(cantab_results_filtered %>% filter(timepoint == 'Week 6') %>% filter(responder_status_delta == 'responder') %>% pull(result),
-            cantab_results_filtered %>% filter(timepoint == 'Week 6') %>% filter(responder_status_delta == 'nonresponder') %>% pull(result))
 
 ```

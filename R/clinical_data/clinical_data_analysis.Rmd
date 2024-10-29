@@ -8,6 +8,9 @@ date: '2022-08-23'
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(Maaslin2)
+library(cowplot)
+
+select = dplyr::select
 ```
 
 ```{r load_metadata}
@@ -40,9 +43,27 @@ dat.glu = read.csv("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/d
 dat.ins = read.csv("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/CLINICAL_DATA/RAMP_Insulin_RawDATA.csv",header = T) %>%
   select(2:4)
 
+dat.bmi = read.csv("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/CLINICAL_DATA/RAMP_BloodPressure_RawDATA.csv",header = T) %>%
+  mutate(Height_M = ifelse(Height_M == 0, NA, Height_M)) %>%
+  mutate(waist_to_height = WAIST / (100*Height_M)) %>%
+  select(c(1, 2, 12, 14, 15, 17)) %>%
+  filter(!is.na(Record.ID)) %>%
+  rename(record_id = Record.ID) %>% 
+  mutate(redcap_event_name = case_when(
+    Visit.ID == 'Visit 1' ~ 'baseline_2_arm_1',
+    Visit.ID == 'Visit 2' ~ 'baseline_arm_1',
+    Visit.ID == 'Visit 3' ~ 'week_3_arm_1',
+    Visit.ID == 'Visit 4' ~ 'week_6_arm_1',
+    Visit.ID == 'Visit 5' ~ 'week_10_arm_1'
+  )) %>%
+  select(-c(Visit.ID)) %>%
+  rename(weight = WEIGHT.IN.KG, bmi = BMI, waist_circ = WAIST) %>%
+  select(c(record_id, redcap_event_name, everything()))
+
 
 ramp_clinical_data = left_join(dat.lip, dat.glu, by=c('record_id', 'redcap_event_name')) %>%
   left_join(dat.ins, by=c('record_id', 'redcap_event_name')) %>%
+  left_join(dat.bmi, by=c('record_id', 'redcap_event_name')) %>%
   rename(participant_id = record_id) %>%
   mutate(participant_id = factor(participant_id)) %>%
   left_join(ramp_metadata_df, by='participant_id') %>%
@@ -62,7 +83,7 @@ ramp_clinical_data = left_join(dat.lip, dat.glu, by=c('record_id', 'redcap_event
 
 ```{r clinical_cleaned_saved}
 clinical_results_merged.impute = ramp_clinical_data %>%
-  select(participant_timepoint, hdl_cholesterol, calculated_ldl_chol, total_cholesterol, triglycerides, blood_glucose, insulin) %>%
+  select(participant_timepoint, hdl_cholesterol, calculated_ldl_chol, total_cholesterol, triglycerides, blood_glucose, insulin, weight, bmi, waist_circ, waist_to_height) %>%
   column_to_rownames(var='participant_timepoint') %>%
   rename_with(~paste0("clinical_", .), names(.)) %>%
   as.matrix() %>%
@@ -100,7 +121,7 @@ perc_change = function(input_df, column, grp) {
 }
 
 
-vars = c('hdl_cholesterol', 'calculated_ldl_chol', 'blood_glucose', 'triglycerides', 'total_cholesterol', 'insulin')
+vars = c('hdl_cholesterol', 'calculated_ldl_chol', 'blood_glucose', 'triglycerides', 'total_cholesterol', 'insulin', 'weight', 'bmi', 'waist_circ', 'waist_to_height')
 arms = c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')
 
 ramp_clinical_perc_change_result_df = data.frame(variable = character(0), 
@@ -140,7 +161,7 @@ clinical_panel_tree_plot = ggplot(tree_plot_df, aes(x=variable, y=average_change
   geom_point(position = position_dodge(width=0.6) , size=3) +
   geom_errorbar(aes(ymin=average_change-error, ymax=average_change+error), position = position_dodge(width=0.6) , width=0.0, size=2) +
   coord_flip() +
-  geom_hline(yintercept=0) +
+  geom_hline(yintercept=0) + 
   theme_bw() +
   theme(panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),
@@ -432,5 +453,159 @@ ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/pl
 
 ```
 
+```{r clinical_panel_plots}
+triglycerides_plot = ggplot(ramp_clinical_data, aes(x=redcap_event_name, y=triglycerides)) +
+  geom_rect(mapping=aes(xmin='baseline_2_arm_1', xmax='week_10_arm_1', ymin=40, ymax=150), fill='#ddf7dd', color='#ddf7dd', alpha=0.1, stat="identity") +
+  geom_boxplot(aes(fill=final_grp), alpha=1, outlier.size = 0.5) +
+  geom_line(aes(group=participant_id), alpha=0.5, size=0.2) +
+  scale_x_discrete(labels=c('-2', '0', '3', '6', '10')) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  facet_wrap(~final_grp) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.title.x=element_blank()) +
+  guides(fill = "none") +
+  xlab('Weeks') +
+  ylab('Triglycerides (mg/dL)')
 
+total_chol_plot = ggplot(ramp_clinical_data, aes(x=redcap_event_name, y=total_cholesterol)) +
+  # geom_rect(mapping=aes(xmin='baseline_2_arm_1', xmax='week_10_arm_1', ymin=125, ymax=200), fill='#ddf7dd', color='#ddf7dd', alpha=0.1, stat="identity") +
+  geom_boxplot(aes(fill=final_grp), alpha=1, outlier.size = 0.5) +
+  geom_line(aes(group=participant_id), alpha=0.5, size=0.2) +
+  scale_x_discrete(labels=c('-2', '0', '3', '6', '10')) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  facet_wrap(~final_grp) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.title.x=element_blank()) +
+  guides(fill = "none") +
+  xlab('Weeks') +
+  ylab('Total Cholesterol (mg/dL)')
+
+ldl_chol_plot = ggplot(ramp_clinical_data, aes(x=redcap_event_name, y=calculated_ldl_chol)) +
+  geom_rect(mapping=aes(xmin='baseline_2_arm_1', xmax='week_10_arm_1', ymin=25, ymax=110), fill='#ddf7dd', color='#ddf7dd', alpha=0.1, stat="identity") +
+  geom_boxplot(aes(fill=final_grp), alpha=1, outlier.size = 0.5) +
+  geom_line(aes(group=participant_id), alpha=0.5, size=0.2) +
+  scale_x_discrete(labels=c('-2', '0', '3', '6', '10')) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  facet_wrap(~final_grp) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.title.x=element_blank()) +
+  guides(fill = "none") +
+  xlab('Weeks') +
+  ylab('LDL Cholesterol (mg/dL)')
+
+hdl_chol_plot = ggplot(ramp_clinical_data, aes(x=redcap_event_name, y=hdl_cholesterol)) +
+  geom_rect(mapping=aes(xmin='baseline_2_arm_1', xmax='week_10_arm_1', ymin=60, ymax=145), fill='#ddf7dd', color='#ddf7dd', alpha=0.1, stat="identity") +
+  geom_boxplot(aes(fill=final_grp), alpha=1, outlier.size = 0.5) +
+  geom_line(aes(group=participant_id), alpha=0.5, size=0.2) +
+  scale_x_discrete(labels=c('-2', '0', '3', '6', '10')) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  facet_wrap(~final_grp) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.title.x=element_blank()) +
+  guides(fill = "none") +
+  xlab('Weeks') +
+  ylab('HDL Cholesterol (mg/dL)')
+
+fasting_insulin_plot = ggplot(ramp_clinical_data, aes(x=redcap_event_name, y=insulin)) +
+  geom_rect(mapping=aes(xmin='baseline_2_arm_1', xmax='week_10_arm_1', ymin=2, ymax=20), fill='#ddf7dd', color='#ddf7dd', alpha=0.1, stat="identity") +
+  geom_boxplot(aes(fill=final_grp), alpha=1, outlier.size = 0.5) +
+  geom_line(aes(group=participant_id), alpha=0.5, size=0.2) +
+  scale_x_discrete(labels=c('-2', '0', '3', '6', '10')) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  facet_wrap(~final_grp) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.title.x=element_blank()) +
+  guides(fill = "none") +
+  xlab('Weeks') +
+  ylab('Fasting Insulin (uU/mL)')
+
+
+fasting_glucose_plot = ggplot(ramp_clinical_data, aes(x=redcap_event_name, y=blood_glucose)) +
+  geom_rect(mapping=aes(xmin='baseline_2_arm_1', xmax='week_10_arm_1', ymin=55, ymax=100), fill='#ddf7dd', color='#ddf7dd', alpha=0.1, stat="identity") +
+  geom_boxplot(aes(fill=final_grp), alpha=1, outlier.size = 0.5) +
+  geom_line(aes(group=participant_id), alpha=0.5, size=0.2) +
+  scale_x_discrete(labels=c('-2', '0', '3', '6', '10')) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  ylim(50, 160) +
+  facet_wrap(~final_grp) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.title.x=element_blank()) +
+  guides(fill = "none") +
+  xlab('Weeks') +
+  ylab('Fasting Glucose (mg/dL)')
+
+bmi_plot = ggplot(ramp_clinical_data, aes(x=redcap_event_name, y=bmi)) +
+  geom_rect(mapping=aes(xmin='baseline_2_arm_1', xmax='week_10_arm_1', ymin=18.5, ymax=24.9), fill='#ddf7dd', color='#ddf7dd', alpha=0.1, stat="identity") +
+  geom_boxplot(aes(fill=final_grp), alpha=1, outlier.size = 0.5) +
+  geom_line(aes(group=participant_id), alpha=0.5, size=0.2) +
+  scale_x_discrete(labels=c('-2', '0', '3', '6', '10')) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  ylim(18, 38) +
+  facet_wrap(~final_grp) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.title.x=element_blank()) +
+  guides(fill = "none") +
+  xlab('Weeks') +
+  ylab('Body Mass Index')
+
+weight_plot = ggplot(ramp_clinical_data, aes(x=redcap_event_name, y=weight)) +
+  geom_rect(mapping=aes(xmin='baseline_2_arm_1', xmax='week_10_arm_1', ymin=0.3, ymax=0.5), fill='#ddf7dd', color='#ddf7dd', alpha=0.1, stat="identity") +
+  geom_boxplot(aes(fill=final_grp), alpha=1, outlier.size = 0.5) +
+  geom_line(aes(group=participant_id), alpha=0.5, size=0.2) +
+  scale_x_discrete(labels=c('-2', '0', '3', '6', '10')) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  ylim(45, 120) +
+  facet_wrap(~final_grp) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  guides(fill = "none") +
+  xlab('Weeks') +
+  ylab('Body Weight (kg)')
+
+waist_to_height_plot = ggplot(ramp_clinical_data %>% filter(waist_to_height > 0.25), aes(x=redcap_event_name, y=waist_to_height)) +
+  geom_rect(mapping=aes(xmin='baseline_2_arm_1', xmax='week_10_arm_1', ymin=0.3, ymax=0.5), fill='#ddf7dd', color='#ddf7dd', alpha=0.1, stat="identity") +
+  geom_boxplot(aes(fill=final_grp), alpha=1, outlier.size = 0.5) +
+  geom_line(aes(group=participant_id), alpha=0.5, size=0.2) +
+  scale_x_discrete(labels=c('-2', '0', '3', '6', '10')) +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  ylim(0.3, 0.75) +
+  facet_wrap(~final_grp) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  guides(fill = "none") +
+  xlab('Weeks') +
+  ylab('Waist-to-Height Ratio')
+
+
+ramp_clinical_panel_composite_plot = ggdraw() +
+  draw_plot(triglycerides_plot, x=0, y=0.8, width=0.47, height=0.2) +
+  draw_plot(total_chol_plot, x=0.5, y=0.8, width=0.47, height=0.2) +
+  draw_plot(ldl_chol_plot, x=0, y=0.6, width=0.47, height=0.2) +
+  draw_plot(hdl_chol_plot, x=0.5, y=0.6, width=0.47, height=0.2) +
+  draw_plot(fasting_insulin_plot, x=0.0, y=0.4, width=0.47, height=0.2) +
+  draw_plot(fasting_glucose_plot, x=0.5, y=0.4, width=0.47, height=0.2) +
+  draw_plot(bmi_plot, x=0.0, y=0.2, width=0.47, height=0.2) +
+  draw_plot(weight_plot, x=0.5, y=0.2, width=0.47, height=0.2) +
+  draw_plot(waist_to_height_plot, x=0.0, y=0.0, width=0.47, height=0.2)
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/clinical_panel_composite_plot.pdf',
+       plot = ramp_clinical_panel_composite_plot,
+       width = 10, height = 12, units = c('in'))
+```
 

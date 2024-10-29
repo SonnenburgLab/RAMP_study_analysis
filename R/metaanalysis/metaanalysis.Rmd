@@ -46,11 +46,8 @@ dbcan_metagenomics_data = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_
 
 ```{r combine_data}
 joined_data = left_join(metabolomics_data, olink_data) %>%
-  # left_join(scfa_data) %>%
-  left_join(clinical_data) %>%
-  left_join(phosphoflow_data) %>%
-  # left_join(dbcan_metagenomics_data) %>%
   left_join(phyloseq_data) %>%
+  left_join(clinical_data) %>%
   filter(!grepl('4011', participant_timepoint)) %>%
   gather(key='feature', value='value', -participant_timepoint) %>%
   rowwise() %>%
@@ -69,13 +66,12 @@ color_df = colnames(joined_data) %>%
   rename(vertex = 1) %>%
   mutate(color = case_when(
     grepl('m_c18', vertex) ~ '#984EA3',  #377EB8
-    grepl('microbiome', vertex) ~ '#4DAF4A',
-    grepl('scfa', vertex) ~ '#FF7F00',
     grepl('clinical', vertex) ~ '#4DAF4A', 
+    grepl('microbiome', vertex) ~ '#444444',
     grepl('olink', vertex) ~ '#FF7F00',  #E41A1C
-    grepl('phosphoflow', vertex) ~ '#A65628',
-    grepl('EDTA', vertex) ~ '#ffffff'
   ))
+color_df_rownames = color_df %>% 
+  column_to_rownames(var='vertex')
 ```
 
 ```{r corr_network}
@@ -99,22 +95,56 @@ adjusted_p_mat = corr_p %>%
   column_to_rownames(var='base') %>%
   as.matrix()
 
-corr_r_filtered[adjusted_p_mat > 0.1] <- 0
+# corr_r_filtered[adjusted_p_mat > 0.1] <- 0
+corr_r_filtered[adjusted_p_mat > 0.05] <- 0
 
-# Make an Igraph object from this matrix:
-network <- graph_from_adjacency_matrix(corr_r_filtered, weighted=T, mode="undirected", diag=F)
-network <- delete.edges(network, E(network)[ weight < 0.0 ])
-E(network)$weight[E(network)$weight <= 0] <- 0.0001
+corr_r_filtered_long = corr_r_filtered %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var='feature1') %>% 
+  gather(key='feature2', value='R', -feature1) %>% 
+  filter(!is.na(R)) %>% 
+  filter(abs(R) > 0) 
 
-V(network)$color <- color_df$color
+corr_r_filtered_long
 
-Isolated = which(igraph::degree(network)==0)
-G2 = delete.vertices(network, Isolated)
+t.graph=graph.data.frame(corr_r_filtered_long,directed=F)
+E(t.graph)$color <- ifelse(E(t.graph)$R > 0, brewer.pal(7, 'Set3')[5],brewer.pal(7, 'Set3')[4])
+
+
+color_vect = names(V(t.graph) %>% as.list()) %>% 
+  as.data.frame() %>% 
+  rename(vertex = 1) %>%
+  mutate(color = case_when(
+    grepl('m_c18', vertex) ~ '#3D82C4',  #377EB8
+    grepl('clinical', vertex) ~ '#014D41', 
+    grepl('olink', vertex) ~ '#D81B61'
+  )) %>% 
+  pull(color)
+
+V(t.graph)$color = color_vect
+
+Isolated = which(igraph::degree(t.graph)==0)
+G2 = delete.vertices(t.graph, Isolated)
+
+# # Make an Igraph object from this matrix:
+# network <- graph_from_adjacency_matrix(corr_r_filtered, weighted=T, mode="undirected", diag=F)
+# network <- delete.edges(network, E(network)[ weight < 0.0 ])
+# E(network)$weight[E(network)$weight <= 0] <- 0.0001
+# 
+# gg <- nexus.get("Davis")
+# 
+# V(network)$color <- color_df$color
+# network$
+# a = E(network)
+# a$V3
+# Isolated = which(igraph::degree(network)==0)
+# G2 = delete.vertices(network, Isolated)
 ```
 
 ```{r plot_igraph}
 # Create igraph plot. Need to run chunk all at once for the saving to work. 
-pdf("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/metaanalysis_correlation_network_no_labels.pdf")
+# pdf("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/metaanalysis_correlation_network_no_labels.pdf")
+pdf("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/metaanalysis_correlation_network_no_labels_v3.pdf")
 # Basic chart
 igraph_plot = plot(G2,
      layout=layout.fruchterman.reingold,
@@ -124,7 +154,18 @@ igraph_plot = plot(G2,
      vertex.label.cex=0.3,
      edge.color=ifelse(corr_matrix$r > 0, brewer.pal(7, 'Set3')[5],brewer.pal(7, 'Set3')[4]))
 
+set.seed(126)
+
+igraph_plot2 = plot(G2,
+     layout=layout.fruchterman.reingold,
+     vertex.size=4,
+     vertex.frame.width=0.4,
+     vertex.label=NA)
+     # vertex.label.cex=0.3)
+
 while (!is.null(dev.list()))  dev.off()
+
+
 ```
 
 ```{r }
@@ -184,14 +225,6 @@ sig_compares = significant_cross_compares %>%
   gather(key='type', value='name') %>%
   pull(name)
 
-p_value_compares %>%
-  filter(compare == 'microbiome_OTU.171' & base %in% sig_compares)
-
-p_value_compares %>%
-  filter(base == 'microbiome_OTU.171' & compare %in% sig_compares)
-# %>%
-#   mutate(inchikey = factor(inchikey, levels=c('Taurine', 'Ornithine', 'Glutamic Acid', 'Pyroglutamic Acid', 'Asparagine', 'Arginine', 'Inosine', 'Hypoxanthine', 'Guanosine', "5'-Methylthioadenosine", "Malic Acid")))
-
 metabolite_by_cytokine_significance = ggplot(significant_cross_compare_with_corr, aes(x=cyto_name, y=inchikey, color=R)) +
   geom_point(aes(size=-log10(p_adj))) +
   scale_color_distiller(palette="RdBu", limits=c(-1, 1), direction=1) +
@@ -199,100 +232,10 @@ metabolite_by_cytokine_significance = ggplot(significant_cross_compare_with_corr
   theme_bw() +
   theme(axis.text.x = element_text(angle = -45, vjust = 1, hjust=0))
 
-# ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/metaanalysis_mbx_olink_correlation_plot.pdf',
-#        plot = metabolite_by_cytokine_significance, 
-#        width = 6, height = 3
-#        )
-
-
-significant_cross_compare_with_corr
-
-ggplot(joined_data %>% rownames_to_column(var='participant_id') %>% left_join(ramp_metadata_df), aes(x=microbiome_OTU.171, y=clinical_blood_glucose)) +
-  geom_point() +
-  stat_smooth(method='lm')
-```
-
-
-```{r shuo_will_data}
-shuo_will_meta = read.csv('/home/mmcarter/user_data/scripts/220830_sh_wvt_nature_data/han_wvt_microbe_metadata.csv') %>%
-  select(X, taxonomy, genus)
-shuo_will_data = read.csv('/home/mmcarter/user_data/scripts/220830_sh_wvt_nature_data/han_wvt_microbe_foldchange.csv') %>%
-  gather(key='metabolite', value='foldchange', -X) %>%
-  left_join(shuo_will_meta) %>%
-  filter(metabolite %in% (significant_cross_compare_with_corr %>% pull(base) %>% unique())) %>%
-  filter(!is.na(foldchange)) %>% 
-  filter(genus == 'Bifidobacterium') %>%
-  arrange(desc(foldchange))
-
-
-joined_data_all = left_join(metabolomics_data, olink_data) %>%
-  left_join(phyloseq_data) %>%
-  left_join(scfa_data) %>%
-  left_join(clinical_data) %>%
-  left_join(phosphoflow_data) %>%
-  left_join(dbcan_metagenomics_data) %>%
-  filter(!grepl('4011', participant_timepoint)) %>%
-  gather(key='feature', value='value', -participant_timepoint) %>%
-  rowwise() %>%
-  mutate(participant_id = strsplit(participant_timepoint, '_')[[1]][1],
-         timepoint = strsplit(participant_timepoint, '_')[[1]][2]) %>%
-  select(-participant_timepoint) %>%
-  spread(key='timepoint', value='value') %>%
-  mutate(base_end = (`3`-`2`)) %>%
-  select(participant_id, feature, base_end) %>%
-  spread(key='feature', value='base_end') %>%
-  column_to_rownames(var='participant_id')
-
-ggplot(joined_data_all, aes(x=microbiome_OTU.191, y=m_c18p_0038)) +
-  geom_point() +
-  stat_smooth(method='lm')
-
-summary(lm(m_c18p_0038 ~ microbiome_OTU.191, data=joined_data_all))
-
-corr_matrix = rcorr(as.matrix(joined_data_all), type='pearson')
-
-corr_r = corr_matrix$r
-corr_r[lower.tri(corr_r, diag=T)] <- NA 
-
-corr_p = corr_matrix$P
-corr_p[lower.tri(corr_p, diag=T)] <- NA 
-
-adjusted_p_mat = corr_matrix$P %>%
-  as.data.frame() %>%
-  rownames_to_column(var='base') %>%
-  gather(key='compare', value='P', -base) 
-
-sig_hits = c('microbiome_OTU.191', 
-             'm_c18p_0038',
-             'm_c18p_0098',
-             'm_c18p_0049',
-             'm_c18p_0032',
-             'm_c18p_0067',
-             'm_c18p_0447',
-             'st1a1',
-             'tnfsf14',
-             'sirt2',
-             'osm',
-             'mcp3')
-
-adjusted_p_mat %>%
-  filter(base %in% sig_hits | compare %in% sig_hits) %>%
-  filter(!is.na(P)) %>%
-  mutate(p_adj = p.adjust(P)) %>%
-  arrange(p_adj) %>%
-  filter(p_adj < 0.1)
- 
-
-# %>%
-#   select(-P) %>%
-#   spread(key='compare', value='p_adj') %>%
-#   column_to_rownames(var='base') %>%
-#   as.matrix()
-
-ggplot(joined_data_all %>% rownames_to_column(var='participant_id') %>% left_join(ramp_metadata_df), aes(x=m_c18p_0098, y=m_c18p_0447)) +
-  geom_point() +
-  geom_text(aes(label=participant_id)) +
-  stat_smooth(method='lm')
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/metaanalysis_mbx_olink_correlation_plot.pdf',
+       plot = metabolite_by_cytokine_significance,
+       width = 6, height = 3
+       )
 ```
 
 

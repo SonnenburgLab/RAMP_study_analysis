@@ -1,0 +1,912 @@
+---
+title: "RAMP 16S Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dada2)
+library(DECIPHER)
+library(phangorn)
+library(phyloseq)
+library(ggplot2)
+library(data.table)
+library(tidyverse)
+library(picante)
+library(corncob)
+library(devtools)
+
+# Uncomment the line below if you need to install the pairwiseAdonis package:
+# install_github("pmartinezarbizu/pairwiseAdonis/pairwiseAdonis")
+```
+
+## Initial sequencing QC
+
+```{r}
+# Load sequencing run quality control metrics.
+# The file contains basic quality metrics for the sequencing run.
+sequencing_run_qc = read_tsv(
+  '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/qc_files/16S_qc_metrics.txt'
+  ) %>%
+  filter(!grepl('BLANK', `general-samplename`)) %>%
+  filter(!grepl('Mean', `general-samplename`)) %>%
+  mutate(SampleID = paste0('S', `general-samplename`))
+
+# Filter samples with more than 4000 reads.
+samples_above_4k = sequencing_run_qc %>%
+  filter(`subsample-rawreads` >= 4000) %>%
+  separate(SampleID, into=c('SampleID', 'Well'), sep='[.]', remove=T) %>%
+  pull(SampleID)
+
+# Visualize the distribution of raw reads across projects.
+# A violin plot is used to show the density of read counts per project.
+ggplot(sequencing_run_qc, aes(x=`general-projectname`, y=`subsample-rawreads`)) +
+  geom_violin(draw_quantiles = c(0.5)) +
+  theme_bw() +
+  theme(panel.grid = element_blank()) +
+  xlab('') +
+  ylab('Raw reads')
+
+```
+
+## Load metadata
+
+```{r metadata}
+# Final set of participant IDs randomized in study. 
+final_participant_list = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_list.csv')
+
+# Load treatment arm randomization data.
+# This file contains participant-level metadata for the RAMP study.
+treatment_arm_randomization = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv') %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  filter(participant_id %in% final_participant_list$participant_id)
+         
+# Load mapping data to connect sequencing data with metadata.
+mapping_df = read_csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_16S_key.csv') %>%
+  rowwise() %>%
+  na.omit() %>%
+  mutate(stool_id = ifelse(participant_id == '4078' & date_collected == '2/16/2020', '2078', stool_id)) %>%
+  mutate(participant_id = as.character(participant_id),
+         timepoint = strsplit(stool_id, '')[[1]][1],
+         timepoint = factor(timepoint, levels=c('1','2','3','4','5')),
+         sample_id = strsplit(sample_id, ' ')[[1]][1],
+         sample_id = strsplit(sample_id, '\\(')[[1]][1],
+         sample_id = paste0('S', sample_id)) %>%
+  left_join(treatment_arm_randomization) %>%
+  arrange(sample_id) %>%
+  filter(!sample_id %in% c('S186', 'S196')) %>%
+  filter(!is.na(timepoint)) %>%
+  column_to_rownames(var='sample_id') %>%
+  arrange(participant_id, timepoint) 
+
+
+# Extract samples that passed initial checks.
+passing_samples = mapping_df %>% 
+  rownames_to_column(var='SampleID') %>%
+  filter(!is.na(timepoint)) %>%
+  filter(!grepl('B', stool_id)) %>%
+  group_by(participant_id) %>%
+  pull(SampleID)
+
+# Extract participants with more than two samples.
+more_than_2 = mapping_df %>% 
+  rownames_to_column(var='SampleID') %>%
+  filter(!is.na(timepoint)) %>%
+  filter(!grepl('B', stool_id)) %>%
+  group_by(participant_id) %>%
+  filter(n() >= 2) %>%
+  pull(SampleID)
+
+# Extract participants with fewer than four samples.
+less_than_4 = mapping_df %>% 
+  rownames_to_column(var='SampleID') %>%
+  filter(!is.na(timepoint)) %>%
+  filter(!grepl('B', stool_id)) %>%
+  group_by(participant_id) %>%
+  filter(n() >= 4) %>%
+  pull(SampleID)
+
+# Identify suspicious samples.
+sus_samples = setdiff(more_than_2, less_than_4)
+```
+
+## Define File Paths
+
+```{r paths}
+# Define paths to input, filtered, and output files.
+input_path = '/home/mmcarter/user_data/Projects/RAMP/16S/Sonnenburg_Project_005_Merged'
+filt_path = "/home/mmcarter/user_data/Projects/RAMP/16S/02.filtered_fastq"
+output_path = "/home/mmcarter/user_data/Projects/RAMP/16S/03.output"
+save_path = "/home/mmcarter/user_data/Projects/RAMP/16S/03.output"
+
+```
+
+## Initial analysis pipeline
+
+```{r load_fastqs}
+# Load FASTQ file names for forward and reverse reads.
+# Gunzip everything first!!
+
+# Get names of forward and reverse FASTQ files.
+fastq_file_list <- sort(list.files(input_path, pattern="fastq"))
+forward_fastq_list <- fastq_file_list[grepl("_R1_", fastq_file_list)]
+reverse_fastq_list <- fastq_file_list[grepl("_R2_", fastq_file_list)]
+
+# Get sample names, assuing files named: R{1,2}_{SAMPLE_NAME}.fastq
+sample_names <- paste0("S", sapply(strsplit(forward_fastq_list, "_"), `[`, 1))
+sample_names <- gsub("SBLANK", "BLANK", x = sample_names)
+
+# Remove sample names that have fewer than 1000 reads, based on previous code chunk. 
+sample_names_length_filtered <- intersect(sample_names, samples_above_4k)
+
+# Build data frames for forward and reverse sets of FASTQ files.
+forward_fastq_df = as.data.frame(forward_fastq_list) %>%
+  separate(col=forward_fastq_list, into=c('sample_base', 'sample_base_wrong'), sep='_', remove=FALSE) %>%
+  rowwise() %>%
+  mutate(sample_base = paste0("S", sample_base),
+    sample_name = strsplit(sample_base, '[.]')[[1]][1]) %>%
+  filter(sample_name %in% sample_names_length_filtered) %>%
+  mutate(unfilt_path = file.path(input_path, forward_fastq_list)) %>%
+  mutate(filt_path = file.path(filt_path, paste0('R1_', sample_name, "_filtered.fastq")))
+
+reverse_fastq_df = as.data.frame(reverse_fastq_list) %>%
+  separate(col=reverse_fastq_list, into=c('sample_base', 'sample_base_wrong'), sep='_', remove=FALSE) %>%
+  rowwise() %>%
+  mutate(sample_base = paste0("S", sample_base),
+    sample_name = strsplit(sample_base, '[.]')[[1]][1]) %>%
+  filter(sample_name %in% sample_names_length_filtered) %>%
+  mutate(unfilt_path = file.path(input_path, reverse_fastq_list)) %>%
+  mutate(filt_path = file.path(filt_path, paste0('R2_', sample_name, "_filtered.fastq")))
+
+
+```
+
+### Filtering and Error Learning
+
+```{r filter_fastq_files}
+# Plot quality profiles of a subset of forward and reverse FASTQ files.
+# This helps in deciding the truncation length for filtering.
+plotQualityProfile(forward_fastq_df$unfilt_path[1:4])
+plotQualityProfile(reverse_fastq_df$unfilt_path[1:4])
+
+# Filter and trim sequences.
+# Parameters such as truncLen and maxEE should be adjusted based on quality profiles.
+filtering_results <- filterAndTrim(fwd=forward_fastq_df$unfilt_path, filt=forward_fastq_df$filt_path, 
+                                   rev=reverse_fastq_df$unfilt_path, filt.rev=reverse_fastq_df$filt_path, 
+                                   truncLen=c(240,160), maxEE=c(2,2), compress=TRUE, multithread=TRUE)
+```
+
+### Learn Error Rates
+
+```{r learn errors}
+# Learn forward error rates.
+# The error model is used by DADA2 to distinguish real biological sequences from errors.
+error_forward <- learnErrors(forward_fastq_df$filt_path, nbases = 1e8, multithread=TRUE, randomize=TRUE)
+error_forward_plot = plotErrors(error_forward, nominalQ=TRUE)
+# Save forward error plot to a file.
+ggsave(filename = file.path(output_path, "210802_error_plot_forward_fastq.pdf"))
+
+# Learn reverse error rates.
+error_reverse <- learnErrors(reverse_fastq_df$filt_path, nbases = 1e8, multithread=TRUE, randomize=TRUE)
+error_reverse_plot = plotErrors(error_reverse, nominalQ=TRUE)
+# Save reverse error plot to a file.
+ggsave(filename = file.path(output_path, "210802_error_plot_reverse_fastq.pdf"))
+```
+
+### Dereplication
+
+```{r dereplicate_fastqs}
+# dereplication
+dereplicated_forward_fastqs <- derepFastq(forward_fastq_df$filt_path)
+dereplicated_reverse_fastqs <- derepFastq(reverse_fastq_df$filt_path)
+# Name the derep-class objects by the sample names
+names(dereplicated_forward_fastqs) <- forward_fastq_df$sample_name
+names(dereplicated_reverse_fastqs) <- reverse_fastq_df$sample_name
+
+```
+
+### Sample Inference and Merging Paired Reads
+
+```{r run_dada}
+# Dereplicate FASTQ files.
+# Dereplication combines identical sequencing reads to speed up processing and improve accuracy.
+dada_forward <- dada(dereplicated_forward_fastqs, err=error_forward, multithread=TRUE, verbose=0)
+dada_reverse <- dada(dereplicated_reverse_fastqs, err=error_reverse, multithread=TRUE, verbose=0)
+
+# Name the dereplicated objects by the sample names.
+merged_pairs <- mergePairs(dada_forward, dereplicated_forward_fastqs, dada_reverse, dereplicated_reverse_fastqs, verbose=FALSE)
+```
+
+### Make sequence table
+
+```{r make_sequence_table}
+# Construct sequence table. Rows are samples, columns are unique 16S sequences.
+seqtab <- makeSequenceTable(merged_pairs)
+
+# Stats for table. 
+dim(seqtab)
+table(nchar(getSequences(seqtab)))
+
+# Remove chimeras
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+
+# Stats for no-chimera table
+dim(seqtab.nochim)
+sum(seqtab.nochim)/sum(seqtab)
+
+# Save cleaned seq table
+saveRDS(seqtab.nochim, file = file.path( output_path, "211205_ramp_seqtab.rds"))
+
+```
+
+```{r benchmark}
+# Benchmark
+getN <- function(x) sum(getUniques(x))
+track <- cbind(filtering_results, sapply(dada_forward, getN), sapply(merged_pairs, getN), rowSums(seqtab), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoised", "merged", "tabled", "nonchim")
+rownames(track) <- forward_fastq_df$sample_name
+write.csv(track, file = file.path(output_path, "211205_ramp_benchmarking_stats.csv"), quote = F)
+```
+
+### Assign Taxonomy
+
+```{r assign_taxonomy}
+# Load sequence table (no chimeras)
+seqtab.nochim = readRDS(file.path(output_path, "211205_ramp_seqtab.rds"))
+
+# Assign taxonomy with Silva
+t_gg <- assignTaxonomy(seqtab.nochim, "/home/mmcarter/R/dada2_files/gg_13_8_train_set_97.fa.gz", multithread=TRUE)
+
+# Assign taxonomy with Silva
+tt <- assignTaxonomy(seqtab.nochim, "/home/mmcarter/R/dada2_files/silva_nr99_v138.1_wSpecies_train_set.fa.gz", multithread=TRUE)
+```
+
+### Make phyloseq objects
+
+```{r make_phyloseq_objects}
+
+# Load metadata and match row names with sequence table
+ordered_metadata = mapping_df[rownames(seqtab.nochim), ]
+
+# Create a phyloseq object with OTU table, sample metadata, and taxonomy
+ps <- phyloseq(otu_table(as.matrix(seqtab.nochim), taxa_are_rows=FALSE), 
+               sample_data(ordered_metadata), 
+               tax_table(as.matrix(t_gg)))
+
+# saveRDS(ps, file = file.path(save_path, "211205_ramp_phyloseq_obj.rds"))
+```
+
+## Read phyloseq objects
+
+```{r read_phy_tree}
+set.seed(1)
+# Load phyloseq object from saved file
+# ps = readRDS(file.path(save_path, "211013_ramp_phyloseq_obj.rds"))
+# Subset samples based on passing samples list
+ps_passing = subset_samples(ps, sample_names(ps) %in% passing_samples)
+
+ps_trim = filter_taxa(ps_passing, function(x) sum(x > 3) > (0.1*length(x)), TRUE)
+
+taxa_names(ps_trim) <- paste0("OTU.", seq(ntaxa(ps_trim)))
+
+# Make log-transformed phyloseq object.
+ps_log <- transform_sample_counts(ps_trim, function(x) log(1 + x))
+
+# Normalize to relative abundance
+ps_rel_ab <- transform_sample_counts(ps_trim, function(x) x / sum(x))
+
+
+```
+
+### Rarefy phyloseq object
+
+```{r rarefy}
+# Rarefy to a uniform depth of 8000 reads across all samples
+set.seed(1)
+ps_rare <- rarefy_even_depth(ps_trim, rngseed=1, replace=FALSE)
+```
+
+## Diversity analysis
+
+### Calculate diversity
+
+```{r diversity}
+
+# Calculate alpha diversity metrics
+# Available measures: Observed, Shannon, Simpson, Fisher, Chao1, InvSimpson
+diversity_ps <- estimate_richness(ps, measures = c("Observed","Shannon", "Simpson", "Fisher", "Chao1", "InvSimpson")) %>%
+  tibble::rownames_to_column(var='SampleID') %>%
+  rowwise() 
+
+# Merge diversity metrics with metadata
+metadata_with_diversity_df = mapping_df %>%
+  # na.omit() %>%
+  rownames_to_column(var='SampleID') %>%
+  left_join(diversity_ps) %>%
+  #filter(SampleID %in% passing_samples) %>%
+  arrange(participant_id, timepoint)
+
+metadata_with_diversity_all_df = mapping_df %>%
+  # na.omit() %>%
+  rownames_to_column(var='SampleID') %>%
+  left_join(diversity_ps) %>%
+  arrange(participant_id, timepoint) 
+
+metadata_with_diversity_all_labelled_group_df = metadata_with_diversity_all_df %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  ungroup() %>%
+  filter(!is.na(Shannon)) %>%
+  filter(Shannon > (mean(Shannon) - 3*sd(Shannon)))
+
+```
+
+### Visualize diversity
+
+```{r }
+
+shannon_plot_labelled = ggplot(metadata_with_diversity_all_labelled_group_df, aes(x=timepoint, y=Shannon, fill=final_grp)) +
+  geom_boxplot() +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ylab('Shannon Diversity') +
+  scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  scale_x_discrete(name='Timepoint', labels=c('Baseline (Week -2)', 'Baseline (Week 0)', 'Midpoint (Week 3)', 'End (Week 6)', 'Washout (Week 10)')) + 
+  ylim(4.8, 7) +
+  guides(fill=FALSE)
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_alpha_diversity_plot.pdf',
+       alpha_diversity_plot, width=6, height=4, units = c('in'))
+
+```
+
+```{r wilcox_tests}
+wilcox.test(metadata_with_diversity_all_df %>% filter(timepoint == 3) %>% filter(final_grp == 'Placebo') %>% pull(Shannon),
+       metadata_with_diversity_all_df %>% filter(timepoint == 3) %>% filter(final_grp == 'High Dose 2FL') %>% pull(Shannon))
+
+wilcox.test(metadata_with_diversity_all_df %>% filter(timepoint == 3) %>% filter(final_grp == 'Low Dose 2FL') %>% pull(InvSimpson),
+       metadata_with_diversity_all_df %>% filter(timepoint == 3) %>% filter(final_grp == 'High Dose 2FL') %>% pull(InvSimpson))
+
+wilcox.test(metadata_with_diversity_all_df %>% filter(timepoint == 3) %>% filter(final_grp == 'Placebo') %>% pull(Observed),
+       metadata_with_diversity_all_df %>% filter(timepoint == 3) %>% filter(final_grp == 'Low Dose 2FL') %>% pull(Observed))
+
+```
+
+## Fold-change heatmap
+
+```{r make_heatmap}
+
+ps_genus = tax_glom(ps_trim, taxrank = "Genus")
+genus_names = tax_table(ps_genus) %>% 
+  as.matrix() %>%
+  as.data.frame() %>%
+  dplyr::rename(GenusName = Genus) %>%
+  mutate(GenusName = ifelse(GenusName == 'g__', str_replace(Family, 'f__', ''), GenusName),
+         GenusName = ifelse(GenusName == '', str_replace(Order, 'o__', ''), GenusName),
+         GenusName = str_replace(GenusName, 'g__', '')) %>% 
+  rownames_to_column(var='Genus') %>%
+  select(Genus, GenusName)
+
+# Extract the genus-level abundance matrix and ensure it has the right orientation
+genus_table <- as.data.frame(otu_table(ps_genus)) %>%
+  as.matrix() %>% as.data.frame() 
+
+# Extract the sample metadata
+metadata <- as.data.frame(sample_data(ps_genus)) %>%
+  as.matrix() %>% as.data.frame() 
+
+# Convert abundance data to long format
+genus_long <- genus_table %>%
+  rownames_to_column(var = "sample_id") %>%
+  pivot_longer(-sample_id, names_to = "Genus", values_to = "abundance") %>%
+  left_join(metadata %>% rownames_to_column(var = "sample_id"), by = "sample_id")
+
+# Calculate fold change for each genus by participant between timepoints
+fold_change_genus_long <- genus_long %>%
+  select(-c(stool_id, date_collected, sample_id)) %>%
+  pivot_wider(names_from = timepoint, values_from = abundance) %>%
+  filter(!is.na(`2`) & !is.na(`3`)) %>%
+  mutate(fold_change = log2((`3` + 1) / (`2` + 1))) %>%
+  select(Genus, participant_id, treatment_grp, fold_change) 
+
+fold_change_summarized = fold_change_genus_long %>%
+  group_by(Genus, treatment_grp) %>%
+  summarise(av_fc = mean(fold_change)) %>%
+  pivot_wider(names_from = treatment_grp, values_from = av_fc) 
+
+# Convert to matrix for heatmap input
+fold_change_matrix_genus <- as.matrix(fold_change_summarized %>% left_join(genus_names) %>% ungroup() %>% select(-c(Genus)) %>% column_to_rownames(var = "GenusName")) 
+
+max_abs_value <- max(abs(fold_change_matrix_genus), na.rm = TRUE)
+# Create a symmetric color palette
+color_palette <- colorRampPalette(c("blue", "white", "red"))(100)
+# Define the breaks to ensure symmetry around 0
+breaks <- seq(-max_abs_value, max_abs_value, length.out = 101)
+
+# Generate the heatmap with annotation
+genus_pheatmap = pheatmap(
+  fold_change_matrix_genus,
+  cluster_rows = TRUE,
+  cluster_cols = T,
+  fontsize_row = 6,
+  cellwidth=8,
+  border_color = NA,
+  color = color_palette,
+  breaks = breaks)
+
+fold_change_genus_long %>%
+  group_by(Genus, treatment_grp) %>%
+  summarize(t_test = list(t.test(fold_change, mu = 0))) %>%
+  mutate(tidy_result = map(t_test, broom::tidy)) %>%
+  unnest(tidy_result) %>% arrange(p.value) %>% 
+  mutate(q.value = p.adjust(p.value, method='BH'))
+
+```
+
+
+```{r save_pheatmap}
+# Open PDF graphics device
+pdf("/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_genus_heatmap_output.pdf", width = 4, height = 4)  # Adjust width and height as needed
+
+# Draw the heatmap
+print(genus_pheatmap)
+
+# Close the graphics device
+dev.off()
+```
+
+## Ordination analyses
+
+```{r pcoa_plots}
+ord <- ordinate(ps_trim, "PCoA", "bray")
+
+pcoa_df = ord$vectors %>%
+  as.data.frame() %>%
+  select(Axis.1, Axis.2, Axis.3, Axis.4) %>%
+  rownames_to_column(var='SampleID') %>%
+  left_join(metadata_with_diversity_all_df) %>%
+  mutate(final_grp = case_when(
+    treatment_grp == '91' ~ 'Low Dose 2FL',
+    treatment_grp == '92' ~ 'Placebo',
+    treatment_grp == '93' ~ 'High Dose 2FL'
+  )) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+
+ord2 <- ordinate(subset_samples(ps_trim, timepoint == 2), "PCoA", "bray")
+pcoa_df_tp2 = ord2$vectors %>%
+  as.data.frame() %>%
+  select(Axis.1, Axis.2, Axis.3, Axis.4) %>%
+  rownames_to_column(var='SampleID') %>%
+  left_join(metadata_with_diversity_all_df) %>%
+  mutate(final_grp = case_when(
+    treatment_grp == '91' ~ 'Low Dose 2FL',
+    treatment_grp == '92' ~ 'Placebo',
+    treatment_grp == '93' ~ 'High Dose 2FL'
+  )) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+ord3 <- ordinate(subset_samples(ps_trim, timepoint == 3), "PCoA", "bray")
+pcoa_df_tp3 = ord3$vectors %>%
+  as.data.frame() %>%
+  select(Axis.1, Axis.2, Axis.3, Axis.4) %>%
+  rownames_to_column(var='SampleID') %>%
+  left_join(metadata_with_diversity_all_df) %>%
+  mutate(final_grp = case_when(
+    treatment_grp == '91' ~ 'Low Dose 2FL',
+    treatment_grp == '92' ~ 'Placebo',
+    treatment_grp == '93' ~ 'High Dose 2FL'
+  )) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+ord4 <- ordinate(subset_samples(ps_trim, timepoint == 4), "PCoA", "bray")
+pcoa_df_tp4 = ord4$vectors %>%
+  as.data.frame() %>%
+  select(Axis.1, Axis.2, Axis.3, Axis.4) %>%
+  rownames_to_column(var='SampleID') %>%
+  left_join(metadata_with_diversity_all_df) %>%
+  mutate(final_grp = case_when(
+    treatment_grp == '91' ~ 'Low Dose 2FL',
+    treatment_grp == '92' ~ 'Placebo',
+    treatment_grp == '93' ~ 'High Dose 2FL'
+  )) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+
+pcoa_tp2_labelled = ggplot(pcoa_df_tp2, aes(x=Axis.1, y=Axis.2, color=final_grp)) +
+  geom_hline(yintercept=0, linetype='dashed', alpha=0.4, size=0.3) +
+  geom_vline(xintercept=0, linetype='dashed', alpha=0.4, size=0.3) +
+  geom_point(size=2, alpha=1) +
+  theme_bw() +
+  scale_color_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  ylab(paste0('PCo2 [', round(ord2$values$Relative_eig[2] * 100, 1),'%]')) +
+  xlab(paste0('PCo1 [', round(ord2$values$Relative_eig[1] * 100, 1),'%]')) + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none") +
+  stat_ellipse(type='t') +
+  scale_x_continuous(limits = c(-0.45, 0.45)) + 
+  scale_y_continuous(limits = c(-0.45, 0.45))
+
+pcoa_tp3_labelled = ggplot(pcoa_df_tp3, aes(x=Axis.1, y=Axis.2, color=final_grp)) +
+  geom_hline(yintercept=0, linetype='dashed', alpha=0.4, size=0.3) +
+  geom_vline(xintercept=0, linetype='dashed', alpha=0.4, size=0.3) +
+  geom_point(size=2, alpha=1) +
+  theme_bw() +
+  scale_color_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  ylab(paste0('PCo2 [', round(ord3$values$Relative_eig[2] * 100, 1),'%]')) +
+  xlab(paste0('PCo1 [', round(ord3$values$Relative_eig[1] * 100, 1),'%]')) + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none") +
+  stat_ellipse(type='t') +
+  ylim(-0.45, 0.45) +
+  xlim(-0.45, 0.45)
+
+pcoa_tp4_labelled = ggplot(pcoa_df_tp4, aes(x=Axis.1, y=Axis.2, color=final_grp)) +
+  geom_hline(yintercept=0, linetype='dashed', alpha=0.4, size=0.3) +
+  geom_vline(xintercept=0, linetype='dashed', alpha=0.4, size=0.3) +
+  geom_point(size=2, alpha=1) +
+  theme_bw() +
+  scale_color_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  ylab(paste0('PCo2 [', round(ord4$values$Relative_eig[2] * 100, 1),'%]')) +
+  xlab(paste0('PCo1 [', round(ord4$values$Relative_eig[1] * 100, 1),'%]')) + 
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.title=element_text(size=10),
+        axis.ticks = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "none") +
+  stat_ellipse(type='t') +
+  ylim(-0.45, 0.45) +
+  xlim(-0.45, 0.45)
+
+pcoa_composite_labelled = ggdraw() +
+  draw_plot(pcoa_tp2_labelled, x=0, y=0.68, width=0.33, height=0.33) +
+  draw_plot(pcoa_tp3_labelled, x=0, y=0.34, width=0.33, height=0.33) +
+  draw_plot(pcoa_tp4_labelled, x=0, y=0.00, width=0.33, height=0.33)
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_pcoa_3_labelled_composite.pdf',
+       pcoa_composite_labelled, width=9, height=6, units=c('in'))
+
+```
+
+### Permanova tests
+
+```{r variance_tests}
+# Adonis tests      
+ps_trim_timepoint_2 = subset_samples(ps_trim, timepoint == 2)
+otu_dist_mat_2 <- vegdist(otu_table(ps_trim_timepoint_2))
+treatment_fact_2 = sample_data(ps_trim_timepoint_2)$final_grp
+adonis2(otu_dist_mat_2 ~ treatment_fact_2, method='bray', perm=500)
+
+ps_trim_timepoint_3 = subset_samples(ps_trim, timepoint == 3)
+otu_dist_mat_3 <- vegdist(otu_table(ps_trim_timepoint_3))
+treatment_fact_3 = sample_data(ps_trim_timepoint_3)$final_grp
+adonis2(otu_dist_mat_3 ~ treatment_fact_3, method='bray', perm=500)
+
+ps_trim_timepoint_4 = subset_samples(ps_trim, timepoint == 4)
+otu_dist_mat_4 <- vegdist(otu_table(ps_trim_timepoint_4))
+treatment_fact_4 = sample_data(ps_trim_timepoint_4)$final_grp
+adonis2(otu_dist_mat_4 ~ treatment_fact_4, method='bray', perm=500)
+
+ps_trim_timepoint_5 = subset_samples(ps_trim, timepoint == 5)
+otu_dist_mat_5 <- vegdist(otu_table(ps_trim_timepoint_5))
+treatment_fact_5 = sample_data(ps_trim_timepoint_5)$final_grp
+adonis2(otu_dist_mat_5 ~ treatment_fact_5, method='bray', perm=500)
+
+# Beta dispersion tests
+beta_tp1 <- betadisper(otu_dist_mat_1, data.frame(sample_data(ps_trim_timepoint_1))$treatment_grp)
+permutest(beta_tp1)
+boxplot(beta_tp1)
+
+beta_tp2 <- betadisper(otu_dist_mat_2, data.frame(sample_data(ps_trim_timepoint_2))$treatment_grp)
+permutest(beta_tp2)
+boxplot(beta_tp2)
+
+beta_tp3 <- betadisper(otu_dist_mat_3, data.frame(sample_data(ps_trim_timepoint_3))$treatment_grp)
+permutest(beta_tp3)
+boxplot(beta_tp3)
+
+beta_tp4 <- betadisper(otu_dist_mat_4, data.frame(sample_data(ps_trim_timepoint_4))$treatment_grp)
+permutest(beta_tp4)
+boxplot(beta_tp4)
+
+beta_tp5 <- betadisper(otu_dist_mat_5, data.frame(sample_data(ps_trim_timepoint_5))$treatment_grp)
+permutest(beta_tp5)
+boxplot(beta_tp5)
+```
+
+### Pairwise Permanovas
+
+```{r pairwise_adonis}
+dim(otu_table(ps_trim_timepoint_3))
+tp3_pairwise = as.data.frame(otu_table(ps_trim_timepoint_3)) %>%
+  cbind(data.frame(sample_data(ps_trim_timepoint_3)))
+pairwiseAdonis::pairwise.adonis2(data[,1:2049]~final_grp,data=tp3_pairwise)
+
+tp4_pairwise = as.data.frame(otu_table(ps_trim_timepoint_4)) %>%
+  cbind(data.frame(sample_data(ps_trim_timepoint_4)))
+pairwiseAdonis::pairwise.adonis2(data[,1:2049]~final_grp,data=tp4_pairwise)
+```
+
+
+## Bifido analysis
+
+```{r bifido_test}
+
+ps_trim_genus = ps_trim %>% tax_glom(taxrank = 'Genus') 
+ps_trim_genus_rel_ab = transform_sample_counts(ps_trim_genus, function(x) x / sum(x))
+tax_table(ps_trim_genus_rel_ab)
+
+bifido_abundance_df = otu_table(ps_trim_genus_rel_ab)[, 'OTU.192'] %>% 
+  as.data.frame() %>%
+  dplyr::rename(OTU_abund = 1) %>%
+  rownames_to_column(var='SampleID') %>%
+  left_join(mapping_df %>% rownames_to_column(var='SampleID'), by='SampleID') %>%
+  group_by(participant_id) %>%
+  arrange(participant_id, timepoint) %>%
+  mutate(final_grp = case_when(
+    treatment_grp == '91' ~ 'Low Dose 2FL',
+    treatment_grp == '92' ~ 'Placebo',
+    treatment_grp == '93' ~ 'High Dose 2FL'
+  )) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) 
+
+
+bifido_abundance_plot_labelled = ggplot(bifido_abundance_df, aes(x=timepoint, y=OTU_abund*100, fill=final_grp)) +
+  geom_boxplot(draw_quantiles=c(0.5)) +
+    scale_fill_manual(values=c('#939598', '#b4cce1', '#5ea1d7')) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ylab('Bifidobacterium relative abundance (%)') +
+  scale_x_discrete(name='Timepoint', labels=c('Baseline\n(Week -2)', 'Baseline\n(Week 0)', 'Midpoint\n(Week 3)', 'End\n(Week 6)', 'Washout\n(Week 10)')) +
+  ylim(0, 45) +
+  guides(fill=FALSE)
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifidobacterium_abund.pdf',
+       bifido_abundance_plot_labelled, width=5, height=3, units = c('in'))
+```
+### Bifido abundance tests
+
+```{r }
+
+wilcox.test(taxa_of_interest %>% filter(treatment_grp == '91') %>% filter(timepoint == 3) %>% pull(OTU_abund),
+            taxa_of_interest %>% filter(treatment_grp == '93') %>% filter(timepoint == 3) %>% pull(OTU_abund))
+
+wilcox.test(taxa_of_interest %>% filter(treatment_grp == '92') %>% filter(timepoint == 3) %>% pull(OTU_abund),
+            taxa_of_interest %>% filter(treatment_grp == '91') %>% filter(timepoint == 3) %>% pull(OTU_abund))
+
+wilcox.test(taxa_of_interest %>% filter(treatment_grp == '92') %>% filter(timepoint == 3) %>% pull(OTU_abund),
+            taxa_of_interest %>% filter(treatment_grp == '93') %>% filter(timepoint == 3) %>% pull(OTU_abund))
+
+wilcox.test(taxa_of_interest %>% filter(treatment_grp == '92') %>% filter(timepoint == 4) %>% pull(OTU_abund),
+            taxa_of_interest %>% filter(treatment_grp == '93') %>% filter(timepoint == 4) %>% pull(OTU_abund))
+
+wilcox.test(taxa_of_interest %>% filter(treatment_grp == '92') %>% filter(timepoint == 2) %>% pull(OTU_abund),
+            taxa_of_interest %>% filter(treatment_grp == '93') %>% filter(timepoint == 2) %>% pull(OTU_abund))
+
+wilcox.test(taxa_of_interest %>% filter(treatment_grp == '93') %>% filter(timepoint == 1) %>% pull(OTU_abund),
+            taxa_of_interest %>% filter(treatment_grp == '93') %>% filter(timepoint == 3) %>% pull(OTU_abund))
+
+wilcox.test(taxa_of_interest %>% filter(treatment_grp == '93') %>% filter(timepoint == 2) %>% pull(OTU_abund),
+            taxa_of_interest %>% filter(treatment_grp == '93') %>% filter(timepoint == 3) %>% pull(OTU_abund))
+
+wilcox.test(taxa_of_interest %>% filter(treatment_grp == '93') %>% filter(timepoint == 5) %>% pull(OTU_abund),
+            taxa_of_interest %>% filter(treatment_grp == '93') %>% filter(timepoint == 3) %>% pull(OTU_abund))
+
+wilcox.test(taxa_of_interest %>% filter(treatment_grp == '91') %>% filter(timepoint == 3) %>% pull(OTU_abund),
+            taxa_of_interest %>% filter(treatment_grp == '91') %>% filter(timepoint == 4) %>% pull(OTU_abund))
+
+```
+
+## Bifido v 2FL
+
+### Determine responders
+
+```{r define_2FL_responders}
+## Load Metabolon 2'-FL quant results
+metabolon_results = read_csv(file = '/home/mmcarter/user_data/scripts/210512_ramp_metabolon_results/210512_metabolon_2fl_results.csv') %>%
+  mutate(Result = ifelse(Result == 'N/Q', '0', Result)) %>%
+  mutate(Result = as.numeric(Result)) %>%
+  mutate(Result = ifelse(Result < LLOQ, LLOQ, Result)) %>%
+  dplyr::rename(participant_id = `Client Sample ID`) %>%
+  rowwise() %>%
+  mutate(participant_id = as.character(participant_id)) %>%
+  dplyr::select(participant_id, Matrix, Result) %>% 
+  spread(key='Matrix', value='Result', fill=NA) %>%
+  dplyr::rename(EDTA_plasma = `EDTA plasma`)
+
+library(impute)
+## Determine changes in bifido abundance over time
+bifido_delta = bifido_abundance_df %>% 
+  select(c(participant_id, treatment_grp, timepoint, OTU_abund)) %>%
+  spread(key='timepoint', val='OTU_abund', fill=NA) %>%
+  filter(treatment_grp != '92') %>%
+  select(-c(treatment_grp)) %>%
+  column_to_rownames(var='participant_id') %>%
+  as.matrix() %>% 
+  impute.knn(.) %>%  # Apply KNN-based imputation
+  .$data %>%          # Extract the imputed data
+  as.data.frame() %>%    # Convert back to a data frame
+  rownames_to_column(var='participant_id') %>%
+  dplyr::rename(bifido_abund_1 = `1`,
+                bifido_abund_2 = `2`,
+                bifido_abund_3 = `3`,
+                bifido_abund_4 = `4`) %>%
+  left_join(treatment_arm_randomization) %>%
+  mutate(delta_2_3 = bifido_abund_3 - bifido_abund_2) %>%
+  select(participant_id, treatment_grp, bifido_abund_1, bifido_abund_2, bifido_abund_3, bifido_abund_4, delta_2_3) 
+
+## Determine median Bifido increase in High Dose 2FL group
+responder_threshold_delta = bifido_delta %>% filter(treatment_grp != '92') %>% pull(delta_2_3) %>% median(na.rm=T)
+
+## Join bifido delta info with 2'-FL quant data
+## Note that individuals in Placebo group (92) are neither responders
+## nor nonresponders!! 
+bifido_responders = bifido_delta %>%
+  mutate(responder_status_delta = case_when(
+    treatment_grp == '92' ~ NA,
+    delta_2_3 >= responder_threshold_delta ~ 'responder',
+    delta_2_3 < responder_threshold_delta ~ 'nonresponder'
+  )) %>%
+  select(-treatment_grp) %>%
+  full_join(metabolon_results) %>%
+  left_join(treatment_arm_randomization, by='participant_id')
+
+## Tally number of responders and nonresponders
+bifido_responders %>%
+  group_by(responder_status_delta) %>%
+  summarise(n())
+
+bifido_delta %>%
+  select(participant_id, treatment_grp)
+
+write.table(bifido_responders, '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/16S_bifido_responder_status.csv',quote = F, sep=',', row.names = F)
+```
+
+### Responder Plots 
+
+```{r }
+bifido_abund_change_with_color = ggplot(bifido_responders %>% filter(final_grp != 'Placebo'), aes(x=final_grp, y=delta_2_3)) +
+  geom_hline(yintercept=0) +
+  geom_violin(draw_quantiles = c(0.5)) +
+  geom_jitter(aes(color=responder_status_delta), width=0.15) +
+  geom_hline(yintercept=responder_threshold_delta, linetype='dashed') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  xlab('Treatment Group') + 
+  ylab('Change in Bifidobacterium abundance\nfrom Week 0 to Week 3 (%)') +
+  scale_color_manual(values=c('#d75e65', '#5e65d7')) +
+  scale_fill_brewer(palette= 'Set2') +
+  scale_y_continuous(limits=c(-0.12, 0.2), breaks=c(-0.1, 0, 0.1, 0.2), labels=c('-10', '0', '10', '20')) +
+  guides(color=FALSE)
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/16S/04.figures/220209_bifido_abund_change_with_color.pdf', plot = bifido_abund_change_with_color, units=c('in'), width=4, height=3)
+
+bifido_responder_at_baseline = ggplot(bifido_responders, aes(x=responder_status_delta, y=bifido_abund_2)) +
+  geom_boxplot(aes(fill=responder_status_delta)) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  xlab('Treatment Group') + 
+  ylab('Bifidobacterium abundance at baseline') +
+  scale_fill_manual(values=c('#d75e65', '#5e65d7')) +
+  scale_y_continuous(limits=c(0, 0.32), breaks=c(0, 0.1, 0.2, 0.3), labels=c('0', '10', '20', '30'))
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/16S/04.figures/220209_bifido_responder_baseline.pdf', plot = bifido_responder_at_baseline, units=c('in'), width=4, height=3.5)
+
+wilcox.test(bifido_responders %>% filter(responder_status_delta == 'responder') %>% pull(bifido_abund_2),
+            bifido_responders %>% filter(responder_status_delta == 'nonresponder') %>% pull(bifido_abund_2))
+
+
+ggplot(bifido_responders %>% filter(!is.na(responder_status_delta)), aes(x=factor(responder_status_delta), y=EDTA_plasma)) +
+  geom_hline(yintercept=0) +
+  geom_boxplot() +
+  # geom_hline(yintercept=responder_threshold_plasma, linetype='dashed') +
+  # geom_jitter(aes(color=responder_status_plasma), width=0.15) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  xlab('Treatment Group') +
+  ylab('Change in Bifidobacterium abundance\nfrom Week 0 to Week 3 (%)') +
+  scale_fill_manual(values=c('#000000', '#be1e2d')) 
+
+
+
+
+urine_2fl_v_bifido = ggplot(bifido_responders %>% filter(treatment_grp != '92'), aes(x=delta_2_3*100, y=Urine, color=responder_status_delta)) +
+  geom_hline(yintercept=0.2, linetype='dashed') +
+  geom_point() +
+  stat_smooth(method='lm') +
+  scale_color_manual(values=c('#d75e65', '#5e65d7')) +
+  coord_cartesian(ylim = c(0, 25)) +
+  theme_classic() +
+  ylab("Urine 2'-FL concentration (ug/mL)") +
+  xlab("Change in Bifidobacterium abundance (Week 0 to Week 3, %)")
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifido_v_urine2fl.pdf', plot = urine_2fl_v_bifido, units=c('in'), width=7, height=3.5)
+
+plasma_2fl_v_bifido = ggplot(bifido_responders %>% filter(treatment_grp != '92'), aes(x=delta_2_3*100, y=EDTA_plasma, color=responder_status_delta)) +
+  geom_hline(yintercept=0.02, linetype='dashed') +
+  geom_point() +
+  stat_smooth(method='lm') +
+  scale_color_manual(values=c('#d75e65', '#5e65d7')) +
+  coord_cartesian(ylim = c(0, 0.3)) +
+  theme_classic() +
+  ylab("Plasma 2'-FL concentration (ug/mL)") +
+  xlab("Change in Bifidobacterium abundance (Week 0 to Week 3, %)")
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/16S_bifido_v_plasma2fl.pdf', plot = plasma_2fl_v_bifido, units=c('in'), width=7, height=3.5)
+
+summary(lm(EDTA_plasma ~ delta_2_3, data = bifido_responders %>% filter(treatment_grp != '92')))
+
+summary(lm(Urine ~ delta_2_3, data = bifido_responders %>% filter(treatment_grp != '92')))
+
+bifido_present_at_base = bifido_responders %>% 
+  filter(!is.na(responder_status_delta)) %>%
+  ungroup() %>%
+  mutate(bifido_at_base = ifelse(bifido_abund_2 > 0, 1, 0)) %>%
+  group_by(responder_status_delta, bifido_at_base) %>% 
+  summarise(num = n()) %>%
+  spread(key='bifido_at_base', value='num') %>% 
+  column_to_rownames(var='responder_status_delta')
+
+chi_square_result <- chisq.test(bifido_present_at_base)  
+```
+
+
+
+
+```{r bifido_v_plasma}
+ggplot(bifido_responders %>% filter(treatment_grp != '92') %>% filter(!is.na(responder_status_delta)), aes(x=responder_status_delta, y=EDTA_plasma)) +
+  geom_boxplot() 
+
+plasma_2fl_change_bifido = ggplot(bifido_responders %>% filter(treatment_grp != '92'), aes(x=EDTA_plasma, y=delta_2_3)) +
+  geom_vline(xintercept = 0.02, linetype = 'dashed') +
+  geom_point() +
+  stat_smooth(method='lm') +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  xlab('2FL concentration in plasma at Week 6 (ug/mL)') + 
+  ylab('Change in Bifidobacterium abundance\nfrom Week 0 to Week 3 (%)') +
+  scale_color_manual(values=c('#000000', '#be1e2d')) +
+  scale_fill_brewer(palette= 'Set2') +
+  scale_y_continuous(limits=c(-0.12, 0.2), breaks=c(-0.1, 0, 0.1, 0.2), labels=c('-10', '0', '10', '20')) +
+  scale_x_continuous(limits=c(0, 0.3), breaks=c(0, 0.1, 0.2), labels=c('0', '0.1', '0.2'))
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/16S/04.figures/220117_2fl_v_bifido_delta.pdf', plot = plasma_2fl_change_bifido, units = c('in'), width=5, height=4)
+
+bifido_metabolon_lm = lm(EDTA_plasma ~ delta_2_3, bifido_responders %>% filter(treatment_grp != '92'))
+summary(bifido_metabolon_lm)
+
+plasma_2fl_responder_status = ggplot(bifido_responders %>% filter(!is.na(responder_status_delta)), aes(x=responder_status_delta, y=EDTA_plasma, fill=responder_status_delta)) +
+  geom_boxplot() +
+ theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  ylab('2FL concentration in plasma at Week 6 (ug/mL)') +
+  scale_y_continuous(limits=c(0, 0.39), breaks=c(0, 0.1, 0.2, 0.3), labels=c('0', '0.1', '0.2', '0.3')) +
+  scale_fill_manual(values=c('#d75e65', '#5e65d7')) +
+  guides(fill=FALSE)
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/16S/04.figures/220213_2fl_v_responder_status.pdf', plot = plasma_2fl_responder_status, units = c('in'), width=2, height=3)
+
+wilcox.test(bifido_responders %>% filter(!is.na(responder_status_delta)) %>% filter(responder_status_delta == 'responder') %>% pull(EDTA_plasma), bifido_responders %>% filter(!is.na(responder_status_delta)) %>% filter(responder_status_delta == 'nonresponder') %>% pull(EDTA_plasma))
+```
+
+
+
+
+

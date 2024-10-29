@@ -61,21 +61,38 @@ metabolon_results_wide %>%
   filter(!is.na(Urine)) %>%
   summarise(percent_urine = sum(Urine > 0.2, na.rm=T) / n())
 
+metabolon_results_wide %>%
+  ungroup() %>%
+  group_by(final_grp) %>%
+  filter(!is.na(`EDTA plasma`)) %>%
+  summarise(mean_plasma = mean(`EDTA plasma`),
+            sd_plasma = sd(`EDTA plasma`))
+
+metabolon_results_wide %>%
+  ungroup() %>%
+  group_by(final_grp) %>%
+  filter(!is.na(Urine)) %>%
+  summarise(mean_urine = mean(Urine),
+            sd_urine = sd(Urine))
+
 # EDTA plasma tests
-t.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% pull(`EDTA plasma`),
+wilcox.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% pull(`EDTA plasma`),
        metabolon_results_wide %>% filter(final_grp == 'Placebo') %>% pull(`EDTA plasma`))
-t.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% pull(`EDTA plasma`),
+wilcox.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% pull(`EDTA plasma`),
        metabolon_results_wide %>% filter(final_grp == 'High Dose 2FL') %>% pull(`EDTA plasma`))
-t.test(metabolon_results_wide %>% filter(final_grp == 'Placebo') %>% pull(`EDTA plasma`),
+wilcox.test(metabolon_results_wide %>% filter(final_grp == 'Placebo') %>% pull(`EDTA plasma`),
        metabolon_results_wide %>% filter(final_grp == 'High Dose 2FL') %>% pull(`EDTA plasma`))
 
 # Urine tests
-t.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine),
+wilcox.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine),
        metabolon_results_wide %>% filter(final_grp == 'Placebo') %>% filter(!is.na(Urine)) %>% pull(Urine))
-t.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine),
+wilcox.test(metabolon_results_wide %>% filter(final_grp == 'Low Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine),
        metabolon_results_wide %>% filter(final_grp == 'High Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine))
-t.test(metabolon_results_wide %>% filter(final_grp == 'Placebo') %>% filter(!is.na(Urine)) %>% pull(Urine),
+wilcox.test(metabolon_results_wide %>% filter(final_grp == 'Placebo') %>% filter(!is.na(Urine)) %>% pull(Urine),
        metabolon_results_wide %>% filter(final_grp == 'High Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine))
+
+
+shapiro.test(metabolon_results_wide %>% filter(final_grp == 'High Dose 2FL') %>% filter(!is.na(Urine)) %>% pull(Urine))
 ```
 
 ```{r covid_deviation_analysis}
@@ -123,4 +140,29 @@ t.test(metabolon_results_wide_deviation %>% filter(final_grp == 'Placebo') %>% f
 
 
 
+```
+
+```{r urine_plasma_correlation}
+urine_plasma_spread = metabolon_results %>%
+  select(participant_id, Matrix, Result, final_grp) %>%
+  spread(key='Matrix', value='Result') %>% 
+  filter(!is.na(Urine))
+
+urine_v_plasma_2fl_plot = ggplot(urine_plasma_spread %>% filter(final_grp != 'Placebo'), aes(x=`EDTA plasma`, y=Urine)) +
+  geom_point() +
+  geom_smooth(method='lm') +
+  theme_classic() +
+  xlab("Plasma 2'-FL concentration (ug/mL)") +
+  ylab("Urine 2'-FL concentration (ug/mL)")
+
+summary(lm(Urine ~ `EDTA plasma`+final_grp, data = urine_plasma_spread %>% filter(final_grp != 'Placebo')))
+
+urine_plasma_spread_no_placebo = urine_plasma_spread %>% filter(final_grp != 'Placebo')
+cor.test(urine_plasma_spread_no_placebo$Urine, urine_plasma_spread_no_placebo$`EDTA plasma`)
+
+cor.test(urine_plasma_spread$Urine, urine_plasma_spread$`EDTA plasma`)
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/2FL_QUANT_urine_v_plasma.pdf',
+       plot = urine_v_plasma_2fl_plot,
+       width=4, height=3, units=c('in'))
 ```

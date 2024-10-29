@@ -1,0 +1,107 @@
+---
+title: "RAMP Diet Analysis"
+output: html_document
+date: '2024-01-17'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+
+```{r load_meta}
+
+ramp_metadata_df = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv') %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  filter(participant_id %in% final_participant_list$participant_id)
+```
+
+
+```{r load_diet_data}
+diet_data_post_intervention = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/220205_RAMP_cronomber_post_macro_micro.csv') %>%
+  rowwise() %>%
+  rename(participant_pre = 1) %>% 
+  mutate(participant_id = strsplit(participant_pre, 'pi')[[1]][1]) %>%
+  select(participant_id, `Energy (kcal)`, `Carbs (g)`, `Fiber (g)`, `Starch (g)`, `Sugars (g)`, `Net Carbs (g)`, `Fat (g)`, `Protein (g)`) %>% 
+  mutate(timepoint = 'End')
+
+diet_data_baseline_intervention = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/220205_RAMP_cronomber_baseline_macro_micro.csv') %>%
+  rowwise() %>%
+  rename(participant_pre = 1) %>% 
+  mutate(participant_id = strsplit(participant_pre, 'b')[[1]][1]) %>%
+  select(participant_id, `Energy (kcal)`, `Carbs (g)`, `Fiber (g)`, `Starch (g)`, `Sugars (g)`, `Net Carbs (g)`, `Fat (g)`, `Protein (g)`) %>%
+  mutate(timepoint = 'Baseline')
+
+diet_data_combined_meta = rbind(diet_data_post_intervention, diet_data_baseline_intervention) %>% 
+  left_join(ramp_metadata_df) %>%
+  mutate(timepoint = factor(timepoint, levels=c('Baseline', 'End'))) %>% 
+  filter(!is.na(final_grp))
+
+
+
+ggplot(diet_data_combined_meta, aes(x=timepoint, y=`Energy (kcal)`)) +
+  geom_boxplot() +
+  facet_wrap(~treatment_grp)
+
+t.test(diet_data_combined_meta %>% filter(treatment_grp == '91') %>% filter(timepoint == 'Baseline') %>% pull(`Energy (kcal)`),
+            diet_data_combined_meta %>% filter(treatment_grp == '91') %>% filter(timepoint == 'End') %>% pull(`Energy (kcal)`))
+
+t.test(diet_data_combined_meta %>% filter(treatment_grp == '92') %>% filter(timepoint == 'Baseline') %>% pull(`Energy (kcal)`),
+            diet_data_combined_meta %>% filter(treatment_grp == '92') %>% filter(timepoint == 'End') %>% pull(`Energy (kcal)`))
+
+t.test(diet_data_combined_meta %>% filter(treatment_grp == '93') %>% filter(timepoint == 'Baseline') %>% pull(`Energy (kcal)`),
+            diet_data_combined_meta %>% filter(treatment_grp == '93') %>% filter(timepoint == 'End') %>% pull(`Energy (kcal)`))
+
+```
+
+```{r micro}
+
+diet_data_post_intervention = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/220205_RAMP_cronomber_post_macro_micro.csv') %>%
+  rowwise() %>%
+  rename(participant_pre = 1) %>% 
+  mutate(participant_id = strsplit(participant_pre, 'pi')[[1]][1]) %>%
+  mutate(timepoint = 'End') %>% 
+  mutate(sample_id = paste0(participant_id, '_', timepoint)) %>% 
+  select(-c(participant_id, timepoint, participant_pre)) 
+
+diet_data_baseline_intervention = read_csv('/home/mmcarter/user_data/Projects/RAMP/SCFA/220205_RAMP_cronomber_baseline_macro_micro.csv') %>%
+  rowwise() %>%
+  rename(participant_pre = 1) %>% 
+  mutate(participant_id = strsplit(participant_pre, 'b')[[1]][1]) %>%
+  mutate(timepoint = 'Baseline') %>% 
+  mutate(sample_id = paste0(participant_id, '_', timepoint)) %>% 
+  select(-c(participant_id, timepoint, participant_pre)) 
+
+diet_data_combined_meta = rbind(diet_data_post_intervention, diet_data_baseline_intervention) %>% 
+  gather(key='feature', value='quantity', -sample_id) %>% 
+  spread(key='feature', value='quantity', fill=0.) %>%
+  column_to_rownames(var='sample_id')
+
+
+
+
+diet_pca = prcomp(diet_data_combined_meta)
+
+diet_pca_meta = diet_pca$x %>% 
+  as.data.frame() %>% 
+  select(PC1, PC2) %>%
+  rownames_to_column(var='sample_id') %>%
+  rowwise() %>%
+  mutate(participant_id = strsplit(sample_id, '_')[[1]][1],
+         timepoint = strsplit(sample_id, '_')[[1]][2]) %>%
+  left_join(ramp_metadata_df) %>%
+  filter(!is.na(covid_deviation))
+
+ggplot(diet_pca_meta, aes(x=PC1, y=PC2, color=covid_deviation)) +
+  geom_point() +
+  theme_bw() 
+
+wilcox.test(diet_pca_meta %>% filter(timepoint == 'End') %>% filter(covid_deviation == FALSE) %>% pull(PC1),
+            diet_pca_meta %>% filter(timepoint == 'End') %>% filter(covid_deviation == TRUE) %>% pull(PC1))
+
+wilcox.test(diet_pca_meta %>% filter(timepoint == 'End') %>% filter(covid_deviation == FALSE) %>% pull(PC2),
+            diet_pca_meta %>% filter(timepoint == 'End') %>% filter(covid_deviation == TRUE) %>% pull(PC2))
+```
+

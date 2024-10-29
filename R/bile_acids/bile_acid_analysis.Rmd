@@ -1,0 +1,964 @@
+---
+title: "bile_acid_analysis"
+output: html_document
+date: '2024-07-18'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(Maaslin2)
+```
+
+## Load meta
+
+```{r load_meta}
+bifido_responders = read_csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/16S_bifido_responder_status.csv') %>%
+  mutate(participant_id = factor(participant_id))
+
+final_participant_list = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_final_participant_list.csv')
+
+ramp_metadata_df = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/metadata/RAMP_participant_metadata.csv') %>%
+  mutate(participant_id = factor(participant_id),
+         final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
+  left_join(bifido_responders) %>%
+  filter(participant_id %in% final_participant_list$participant_id)
+
+```
+
+## Load data
+
+```{r load_data}
+
+targeted_bile_results = read.csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/BILE_ACIDS/240718_metabolon_targeted_bile_analysis.csv') %>%
+  select(`Subject.or.Animal.ID`, `Time.Point`, Analyte, `Measured.Concentration..ng.mg.`, `Weight.Corrected.Concentration..ng.mg.`, `LLOQ..ng.mg.`, `ULOQ..ng.mg.`, `Dilution.Factor`, `Client.Sample.ID`) %>%
+  rename(participant_id = 1,
+         timepoint = 2,
+         analyte = 3,
+         measured_conc = 4, 
+         corrected_conc = 5, 
+         lloq = 6, 
+         uloq = 7, 
+         dilution_factor = 8,
+         sample_id = 9) %>%
+  select(sample_id, everything()) %>%
+  mutate(participant_id = factor(participant_id)) %>%
+  mutate(timepoint = ifelse(sample_id == 'RAMP91', 4, timepoint)) %>% 
+  filter(timepoint %in% c(2, 3)) %>%
+  mutate(timepoint = factor(timepoint)) %>% 
+  rowwise() %>%
+  mutate(measured_conc = case_when(
+    measured_conc == 'BLOQ' ~ as.character(lloq),
+    measured_conc == 'NR' ~ NA,
+    TRUE ~ measured_conc
+  ),
+  corrected_conc = case_when(
+    corrected_conc == 'BLOQ' ~ as.character(lloq),
+    corrected_conc == 'NR' ~ NA,
+    TRUE ~ corrected_conc
+  )) %>%
+  filter(!is.na(measured_conc)) %>%
+  mutate(measured_conc = as.numeric(measured_conc),
+         corrected_conc = as.numeric(corrected_conc)) %>%
+  mutate(analyte = factor(analyte, levels=c('Cholic Acid', 'Chenodeoxycholic Acid', 'Glycocholic Acid', 'Glycochenodeoxycholic Acid', 'Taurocholic Acid', 'Taurochenodeoxycholic Acid', 'Deoxycholic Acid', 'Lithocholic Acid', 'Ursodeoxycholic Acid', 'Glycodeoxycholic Acid', 'Glycolithocholic Acid', 'Glycoursodeoxycholic Acid', 'Taurodeoxycholic Acid', 'Taurolithocholic Acid', 'Tauroursodeoxycholic Acid'))) %>% 
+  mutate(timepoint = factor(ifelse(timepoint == 2, 'Week 0', 'Week 3'), levels=c('Week 0', 'Week 3')))
+
+targeted_bile_results_with_meta = targeted_bile_results %>% 
+  left_join(ramp_metadata_df, by='participant_id') %>% 
+  group_by(analyte) %>%
+  filter(corrected_conc < (mean(corrected_conc, na.rm=T)+3*sd(corrected_conc, na.rm=T))) %>%
+  ungroup()
+
+targeted_bile_results %>% 
+  group_by(analyte) %>%
+  summarise(mean(corrected_conc, na.rm=T),
+            sd(corrected_conc, na.rm=T))
+```
+
+## Compositional analysis
+
+```{r }
+
+library(viridis)
+
+bile_acid_rel_ab = targeted_bile_results_with_meta %>% 
+  group_by(participant_id, timepoint) %>%
+  arrange(participant_id, timepoint) %>%
+  mutate(rel_ab = 100*corrected_conc / sum(corrected_conc, na.rm=T))
+
+bile_acid_rel_ab %>% group_by(analyte) %>% summarise(tot = sum(corrected_conc)) %>% arrange(desc(tot))
+
+low_bile = c('Glycoursodeoxycholic Acid', 'Taurolithocholic Acid', 'Glycolithocholic Acid', 'Tauroursodeoxycholic Acid', 'Taurodeoxycholic Acid')
+
+bile_acid_rel_ab_collapsed = bile_acid_rel_ab %>% 
+  mutate(analyte = as.character(analyte)) %>%
+  mutate(analyte_alt = ifelse(analyte %in% low_bile, 'Other', analyte)) %>% 
+  mutate(analyte_alt = factor(analyte_alt, levels = c('Cholic Acid', 'Chenodeoxycholic Acid', 'Glycocholic Acid', 'Glycochenodeoxycholic Acid', 'Taurocholic Acid', 'Taurochenodeoxycholic Acid', 'Deoxycholic Acid', 'Lithocholic Acid', 'Ursodeoxycholic Acid', 'Glycodeoxycholic Acid', 'Other'))) %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')))
+
+ggplot(bile_acid_rel_ab_collapsed, aes(fill=factor(analyte_alt), y=corrected_conc, x=participant_id)) +
+  geom_bar(position='stack', stat='identity') +
+  facet_wrap(timepoint~final_grp, scales='free_x') +
+  scale_fill_brewer(palette = 'Spectral', name = 'Analyte') +
+  scale_y_continuous(limits = c(0, 5000), expand = c(0.0, 0)) +
+  theme_classic() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_blank()) +
+  ylab('Concentration (ng/mg feces)') +
+  xlab('Participand ID') 
+
+ggplot(bile_acid_rel_ab_collapsed, aes(fill=factor(analyte_alt), y=rel_ab, x=participant_id)) +
+  geom_bar(position='stack', stat='identity') +
+  facet_wrap(timepoint~final_grp, scales='free_x') +
+  scale_fill_brewer(palette = 'Spectral', name = 'Analyte') +
+  scale_y_continuous(limits = c(0, 100), expand = c(0.0, 0)) +
+  theme_classic() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_blank()) +
+  ylab('Relative Abundance') +
+  xlab('Participand ID') 
+
+```
+
+
+## By treatment group
+
+#### Individual concentrations
+
+```{r plot_bile}
+all_bile_plot = ggplot(targeted_bile_results_with_meta, aes(x=timepoint, y=corrected_conc, fill=factor(final_grp))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(pch=21, position=position_jitterdodge(), size=1) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=330, hjust=0),
+        legend.position='bottom') +
+  ylab('Concentration (ng/mg feces)') +
+  xlab('Timepoint') +
+  facet_wrap(~analyte, scales='free_y', nrow=3) +
+  scale_fill_brewer(palette='Set2') +
+  scale_color_brewer(palette='Set2') +
+  guides(fill=guide_legend(title="Treatment Group"))
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/BILE_ACIDS/figures/all_bile_acids.pdf',
+       all_bile_plot,
+       width=12, height=6)
+
+wilcox.test(targeted_bile_results_with_meta %>% filter(analyte == 'Taurocholic Acid') %>% filter(final_grp == 'High Dose 2FL') %>% filter(timepoint == 'Week 0') %>% pull(corrected_conc),
+            targeted_bile_results_with_meta %>% filter(analyte == 'Taurocholic Acid') %>% filter(final_grp == 'High Dose 2FL') %>% filter(timepoint == 'Week 3') %>% pull(corrected_conc))
+
+
+```
+
+#### Fold change
+
+```{r fold_change}
+bile_acid_fold_change = targeted_bile_results_with_meta %>% 
+  select(participant_id, timepoint, analyte, measured_conc, lloq) %>%
+  spread(key='timepoint', value='measured_conc') %>% 
+  mutate(`Week 3` = ifelse(is.na(`Week 3`), as.numeric(lloq), `Week 3`),
+         `Week 0` = ifelse(is.na(`Week 0`), as.numeric(lloq), `Week 0`)) %>%
+  mutate(fc = `Week 3`/`Week 0`) %>% 
+  left_join(ramp_metadata_df, by='participant_id') %>% 
+  group_by(analyte) %>%
+  filter(fc < (mean(fc, na.rm=T)+3*sd(fc, na.rm=T))) %>%
+  ungroup() %>%
+  mutate(log2_fc = log2(fc))
+
+bile_acid_fold_change_plots = ggplot(bile_acid_fold_change, aes(x=final_grp, y=log2_fc, fill=factor(final_grp))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(pch=21, position=position_jitterdodge(), size=1.5) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=330, hjust=0),
+        legend.position='bottom') +
+  ylab('log2(Fold-change)') +
+  xlab('Timepoint') +
+  facet_wrap(~analyte, scales='free_y', nrow=2) +
+  scale_fill_brewer(palette='Set2') +
+  scale_color_brewer(palette='Set2') +
+  guides(fill=guide_legend(title="Treatment Group"))
+
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/BILE_ACIDS/figures/bile_acid_fold_change.pdf',
+       plot = bile_acid_fold_change_plots,
+       width=16, height=6)
+
+
+t.test(bile_acid_fold_change %>% filter(analyte == 'Lithocholic Acid') %>% filter(final_grp == 'High Dose 2FL') %>% pull(log2_fc), mu = 0, alternative = "two.sided")
+
+t.test(bile_acid_fold_change %>% filter(analyte == 'Deoxycholic Acid') %>% filter(final_grp == 'High Dose 2FL') %>% pull(log2_fc), mu = 0, alternative = "two.sided")
+
+wilcox.test(bile_acid_fold_change %>% filter(analyte == 'Taurodeoxycholic Acid') %>% filter(final_grp == 'High Dose 2FL') %>% pull(log2_fc),
+       bile_acid_fold_change %>% filter(analyte == 'Taurodeoxycholic Acid') %>% filter(final_grp == 'Placebo') %>% pull(log2_fc))
+
+
+
+```
+
+#### Conjugation subset
+
+```{r by_type}
+bile_acid_annotations = targeted_bile_results_with_meta %>% 
+  pull(analyte) %>% 
+  unique() %>%
+  as.data.frame() %>% 
+  rename(analyte = 1) %>%
+  mutate(conjugated = case_when(
+    grepl('Glyco', analyte) ~ 'Conjugated',
+    grepl('Tauro', analyte) ~ 'Conjugated',
+    TRUE ~ 'Unconjugated'
+  ),
+  which_conjugated = case_when(
+    grepl('Glyco', analyte) ~ 'Glycine-conjugated',
+    grepl('Tauro', analyte) ~ 'Taurine-conjugated',
+    TRUE ~ 'Unconjugated'
+  ),
+  primary_or_secondary = case_when(
+    analyte == 'Cholic Acid' ~ 'Primary',
+    analyte == 'Chenodeoxycholic Acid' ~ 'Primary',
+    analyte == "Deoxycholic Acid" ~ 'Secondary',
+    analyte == "Glycochenodeoxycholic Acid" ~ 'Primary',
+    analyte == "Glycocholic Acid" ~ 'Primary',
+    analyte == 'Glycodeoxycholic Acid' ~ 'Secondary',
+    analyte == "Glycolithocholic Acid" ~ 'Secondary',
+    analyte == 'Glycoursodeoxycholic Acid' ~ 'Secondary',
+    analyte == 'Lithocholic Acid' ~ 'Secondary',
+    analyte == 'Taurochenodeoxycholic Acid' ~ 'Primary',
+    analyte == 'Taurocholic Acid' ~ 'Primary',
+    analyte == 'Taurodeoxycholic Acid' ~ 'Secondary',
+    analyte == 'Taurolithocholic Acid' ~ 'Secondary',
+    analyte == 'Tauroursodeoxycholic Acid' ~ 'Secondary',
+    analyte == 'Ursodeoxycholic Acid' ~ 'Secondary'
+  ),
+  primsec_conj = case_when(
+    analyte == 'Cholic Acid' ~ 'Primary Unconjugated',
+    analyte == 'Chenodeoxycholic Acid' ~ 'Primary Unconjugated',
+    analyte == "Deoxycholic Acid" ~ 'Secondary Unconjugated',
+    analyte == "Glycochenodeoxycholic Acid" ~ 'Primary Conjugated',
+    analyte == "Glycocholic Acid" ~ 'Primary Conjugated',
+    analyte == 'Glycodeoxycholic Acid' ~ 'Secondary Conjugated',
+    analyte == "Glycolithocholic Acid" ~ 'Secondary Conjugated',
+    analyte == 'Glycoursodeoxycholic Acid' ~ 'Secondary Conjugated',
+    analyte == 'Lithocholic Acid' ~ 'Secondary Unconjugated',
+    analyte == 'Taurochenodeoxycholic Acid' ~ 'Primary Conjugated',
+    analyte == 'Taurocholic Acid' ~ 'Primary Conjugated',
+    analyte == 'Taurodeoxycholic Acid' ~ 'Secondary Conjugated',
+    analyte == 'Taurolithocholic Acid' ~ 'Secondary Conjugated',
+    analyte == 'Tauroursodeoxycholic Acid' ~ 'Secondary Conjugated',
+    analyte == 'Ursodeoxycholic Acid' ~ 'Secondary Unconjugated'
+  ))
+
+targeted_bile_results_with_meta_with_bile_annot = targeted_bile_results_with_meta %>% 
+  left_join(bile_acid_annotations, by='analyte') 
+
+bile_conjugation_summary = targeted_bile_results_with_meta_with_bile_annot %>% 
+  group_by(participant_id, timepoint, primsec_conj) %>%
+  summarise(total_conc = sum(measured_conc, na.rm = T)) %>% 
+  left_join(ramp_metadata_df, by='participant_id')
+
+
+bile_acid_categories_plot = ggplot(bile_conjugation_summary, aes(x=timepoint, y=total_conc, fill=factor(final_grp))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(pch=21, position=position_jitterdodge(), size=1.5) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=330, hjust=0),
+        legend.position='bottom') +
+  ylab('Concentration (ng/mg feces)') +
+  xlab('Timepoint') +
+  facet_wrap(~primsec_conj, scales='free_y', nrow=2) +
+  scale_fill_brewer(palette='Set2') +
+  scale_color_brewer(palette='Set2') +
+  guides(fill=guide_legend(title="Treatment Group"))
+
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/BILE_ACIDS/figures/bile_acid_categories.pdf',
+       plot = bile_acid_categories_plot,
+       width=8, height=6)
+
+wilcox.test(bile_conjugation_summary %>% filter(final_grp == 'High Dose 2FL') %>% filter(timepoint == 'Week 0') %>% filter(primsec_conj == 'Secondary Unconjugated') %>% pull(total_conc),
+            bile_conjugation_summary %>% filter(final_grp == 'Placebo') %>% filter(timepoint == 'Week 0') %>% filter(primsec_conj == 'Secondary Unconjugated') %>% pull(total_conc))
+
+wilcox.test(bile_conjugation_summary %>% filter(final_grp == 'High Dose 2FL') %>% filter(timepoint == 'Week 0') %>% filter(primsec_conj == 'Secondary Unconjugated') %>% pull(total_conc),
+            bile_conjugation_summary %>% filter(final_grp == 'High Dose 2FL') %>% filter(timepoint == 'Week 3') %>% filter(primsec_conj == 'Secondary Unconjugated') %>% pull(total_conc))
+
+```
+
+#### Conjugation fold change
+
+
+```{r }
+
+log2fc_conjugaiton_summary = bile_conjugation_summary %>% 
+  select(participant_id, timepoint, primsec_conj, total_conc) %>%
+  spread(key='timepoint', value='total_conc') %>% 
+  mutate(fc = `Week 3`/`Week 0`) %>% 
+  left_join(ramp_metadata_df, by='participant_id') %>% 
+  group_by(primsec_conj) %>%
+  filter(fc < (mean(fc, na.rm=T)+3*sd(fc, na.rm=T))) %>%
+  ungroup() %>%
+  mutate(log2_fc = log2(fc))
+
+bile_acid_category_fold_change = ggplot(log2fc_conjugaiton_summary, aes(x=final_grp, y=log2_fc, fill=factor(final_grp))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(pch=21, position=position_jitterdodge(), size=1.5) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=330, hjust=0),
+        legend.position='bottom') +
+  ylab('log2(Fold-change)') +
+  xlab('Timepoint') +
+  facet_wrap(~primsec_conj, scales='free_y', nrow=2) +
+  scale_fill_brewer(palette='Set2') +
+  scale_color_brewer(palette='Set2') +
+  guides(fill=guide_legend(title="Treatment Group"))
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/BILE_ACIDS/figures/bile_acid_categories_fold_change.pdf',
+       plot = bile_acid_category_fold_change,
+       width=8, height=6)
+
+wilcox.test(log2fc_conjugaiton_summary %>% filter(primsec_conj == 'Secondary Unconjugated') %>% filter(final_grp == 'High Dose 2FL') %>% pull(fc),
+            log2fc_conjugaiton_summary %>% filter(primsec_conj == 'Secondary Unconjugated') %>% filter(final_grp == 'Placebo') %>% pull(fc))
+```
+
+#### Conjugation fraction
+
+```{r }
+
+conjugation_ratios = targeted_bile_results_with_meta_with_bile_annot %>% 
+  group_by(participant_id, timepoint, conjugated) %>%
+  summarise(total_conc = sum(measured_conc, na.rm = T)) %>% 
+  left_join(ramp_metadata_df, by='participant_id') %>%
+  spread(key='conjugated', value='total_conc') %>%
+  mutate(ratio = Conjugated / Unconjugated) %>% 
+  ungroup() %>%
+  filter(ratio < mean(ratio)+3*sd(ratio))
+
+bile_acid_conjugation_fraction_plot = ggplot(conjugation_ratios, aes(x=timepoint, y=ratio*100, fill=factor(final_grp))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(pch=21, position=position_jitterdodge(), size=1.5) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=330, hjust=0),
+        legend.position='bottom') +
+  ylab('Percent of bile acid pool that is conjugated (%)') +
+  xlab('Timepoint') +
+  scale_fill_brewer(palette='Set2') +
+  scale_color_brewer(palette='Set2') +
+  guides(fill=guide_legend(title="Treatment Group"))
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/BILE_ACIDS/figures/bile_acid_categories_fraction.pdf',
+       plot = bile_acid_conjugation_fraction_plot,
+       width=5, height=5)
+
+wilcox.test(conjugation_ratios %>% filter(final_grp == 'High Dose 2FL') %>% filter(timepoint == 'Week 0') %>% pull(ratio),
+            conjugation_ratios %>% filter(final_grp == 'High Dose 2FL') %>% filter(timepoint == 'Week 3') %>% pull(ratio),
+            paired=T)
+```
+#### Maaslin analysis
+
+```{r }
+
+problem_samples = c('RAMP94', 'RAMP104', 'RAMP24', 'RAMP86', 'RAMP102', 'RAMP92', 'RAMP4', 'RAMP50')
+
+bile_abund_matrix_raw = targeted_bile_results_with_meta %>% 
+  ungroup() %>%
+  select(sample_id, analyte, measured_conc) %>%
+  spread(key='analyte', value='measured_conc', fill=0.5) %>%
+  column_to_rownames(var='sample_id')
+
+bile_meta_df = targeted_bile_results_with_meta %>% 
+  select(sample_id, participant_id, timepoint, final_grp, age, gender) %>%
+  distinct() %>%
+  mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL')),
+    phase_grp = as.numeric(timepoint)*as.numeric(final_grp)) %>%
+  filter(!sample_id %in% problem_samples) %>%
+  column_to_rownames(var='sample_id')
+
+bile_abund_matrix_filtered = bile_abund_matrix_raw[rownames(bile_meta_df), ]
+
+
+all_groups_mas_bile_acid_grp <- Maaslin2(
+  input_data = bile_abund_matrix_raw,
+  input_metadata = bile_meta_df,
+  output = "/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.0,
+  normalization = "NONE",
+  transform = "NONE",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("final_grp", "phase_grp"),
+  random_effects = c("participant_id"),
+  reference = c("final_grp,Placebo"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+
+all_groups_mas_bile_acid_grp$results %>%
+  filter(metadata == 'phase_grp') %>%
+  arrange(pval)
+
+```
+
+##### Responders
+
+```{r }
+
+bile_abund_matrix_raw = targeted_bile_results_with_meta %>% 
+  ungroup() %>%
+  select(sample_id, analyte, measured_conc) %>%
+  spread(key='analyte', value='measured_conc', fill=0.5) %>%
+  column_to_rownames(var='sample_id')
+
+bile_meta_resp_df = targeted_bile_results_with_meta %>% 
+  select(sample_id, participant_id, timepoint, responder_status_delta, age, gender) %>%
+  filter(!is.na(responder_status_delta)) %>%
+  distinct() %>%
+  mutate(responder_status_delta = factor(responder_status_delta, levels=c('nonresponder', 'responder')),
+    phase_responder = as.numeric(timepoint)*as.numeric(responder_status_delta)) %>%
+  column_to_rownames(var='sample_id')
+
+bile_abund_matrix_filtered = bile_abund_matrix_raw[rownames(bile_meta_resp_df), ]
+
+
+all_groups_mas_bile_acid_responder <- Maaslin2(
+  input_data = bile_abund_matrix_filtered,
+  input_metadata = bile_meta_resp_df,
+  output = "/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAASLIN",
+  min_abundance = 0.0,
+  min_prevalence = 0.0,
+  normalization = "TSS",
+  transform = "LOG",
+  analysis_method = "LM",
+  max_significance = 0.05,
+  fixed_effects = c("responder_status_delta", "phase_responder", "age", "gender"),
+  random_effects = c("participant_id"),
+  reference = c("final_grp,Placebo"),
+  correction = "BH",
+  standardize = TRUE,
+  cores = 1)
+
+
+all_groups_mas_bile_acid_responder$results %>%
+  filter(metadata == 'phase_responder') %>%
+  arrange(pval)
+```
+
+
+
+## By responder status
+
+#### Individual concentration
+
+```{r }
+targeted_bile_results_with_meta_resp = targeted_bile_results_with_meta %>% 
+  filter(!is.na(responder_status_delta))
+
+all_bile_acids_resp_plot = ggplot(targeted_bile_results_with_meta_resp, aes(x=timepoint, y=corrected_conc, fill=factor(responder_status_delta))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(pch=21, position=position_jitterdodge(), size=1) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=330, hjust=0),
+        legend.position='bottom') +
+  ylab('Concentration (ng/mg feces)') +
+  xlab('Timepoint') +
+  facet_wrap(~analyte, scales='free_y', nrow=2) +
+  scale_fill_brewer(palette='Set1') +
+  scale_color_brewer(palette='Set1') +
+  guides(fill=guide_legend(title="Responder Status"))
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/BILE_ACIDS/figures/all_bile_acids_resp.pdf',
+       all_bile_acids_resp_plot,
+       width=18, height=7)
+
+wilcox.test(targeted_bile_results_with_meta_resp %>% filter(analyte == 'Glycocholic Acid') %>% filter(responder_status_delta == 'responder') %>% filter(timepoint == 'Week 3') %>% pull(corrected_conc), 
+            targeted_bile_results_with_meta_resp %>% filter(analyte == 'Glycocholic Acid') %>% filter(responder_status_delta == 'nonresponder') %>% filter(timepoint == 'Week 3') %>% pull(corrected_conc))
+```
+
+#### Fold change
+
+```{r }
+bile_acid_fold_change_resp = targeted_bile_results_with_meta_resp %>% 
+  select(participant_id, timepoint, analyte, measured_conc, lloq) %>%
+  spread(key='timepoint', value='measured_conc') %>% 
+  mutate(`Week 3` = ifelse(is.na(`Week 3`), as.numeric(lloq), `Week 3`),
+         `Week 0` = ifelse(is.na(`Week 0`), as.numeric(lloq), `Week 0`)) %>%
+  mutate(fc = `Week 3`/`Week 0`) %>% 
+  left_join(ramp_metadata_df, by='participant_id') %>% 
+  group_by(analyte) %>%
+  filter(fc < (mean(fc, na.rm=T)+3*sd(fc, na.rm=T))) %>%
+  ungroup() %>%
+  mutate(log2_fc = log2(fc))
+
+bile_acid_fold_change_plots_resp = ggplot(bile_acid_fold_change_resp, aes(x=responder_status_delta, y=log2_fc, fill=factor(responder_status_delta))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(pch=21, position=position_jitterdodge(), size=1.5) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=330, hjust=0),
+        legend.position='bottom') +
+  ylab('log2(Fold-change)') +
+  xlab('Timepoint') +
+  facet_wrap(~analyte, scales='free_y', nrow=2) +
+  scale_fill_brewer(palette='Set1') +
+  scale_color_brewer(palette='Set1') +
+  guides(fill=guide_legend(title="Responder Status"))
+
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/BILE_ACIDS/figures/bile_acid_fold_change_responder.pdf',
+       plot = bile_acid_fold_change_plots_resp,
+       width=16, height=6)
+
+
+t.test(bile_acid_fold_change_resp %>% filter(analyte == 'Glycodeoxycholic Acid') %>% filter(responder_status_delta == 'responder') %>% pull(log2_fc), mu = 0, alternative = "two.sided")
+
+wilcox.test(bile_acid_fold_change_resp %>% filter(analyte == 'Glycochenodeoxycholic Acid') %>% filter(responder_status_delta == 'responder') %>% pull(log2_fc),
+       bile_acid_fold_change_resp %>% filter(analyte == 'Glycochenodeoxycholic Acid') %>% filter(responder_status_delta == 'nonresponder') %>% pull(log2_fc),
+       alternative='two.sided')
+```
+
+#### Conjugation Subset
+
+```{r }
+bile_conjugation_summary_resp = bile_conjugation_summary %>% 
+  filter(!is.na(responder_status_delta))
+
+ggplot(bile_conjugation_summary_resp, aes(x=timepoint, y=total_conc, fill=factor(responder_status_delta))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(pch=21, position=position_jitterdodge(), size=1.5) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=330, hjust=0),
+        legend.position='bottom') +
+  ylab('Concentration (ng/mg feces)') +
+  xlab('Timepoint') +
+  facet_wrap(~primsec_conj, scales='free_y', nrow=2) +
+  scale_fill_brewer(palette='Set1') +
+  scale_color_brewer(palette='Set1') +
+  guides(fill=guide_legend(title="Treatment Group"))
+
+```
+
+#### Conjugation fold change
+
+```{r }
+log2fc_conjugaiton_summary_resp = bile_conjugation_summary_resp %>% 
+  select(participant_id, timepoint, primsec_conj, total_conc) %>%
+  spread(key='timepoint', value='total_conc') %>% 
+  mutate(fc = `Week 3`/`Week 0`) %>% 
+  left_join(ramp_metadata_df, by='participant_id') %>% 
+  group_by(primsec_conj) %>%
+  filter(fc < (mean(fc, na.rm=T)+3*sd(fc, na.rm=T))) %>%
+  ungroup() %>%
+  mutate(log2_fc = log2(fc))
+
+ggplot(log2fc_conjugaiton_summary_resp, aes(x=responder_status_delta, y=log2_fc, fill=factor(responder_status_delta))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(pch=21, position=position_jitterdodge(), size=1.5) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=330, hjust=0),
+        legend.position='bottom') +
+  ylab('log2(Fold-change)') +
+  xlab('Timepoint') +
+  facet_wrap(~primsec_conj, scales='free_y', nrow=2) +
+  scale_fill_brewer(palette='Set1') +
+  scale_color_brewer(palette='Set1') +
+  guides(fill=guide_legend(title="Treatment Group"))
+
+wilcox.test(log2fc_conjugaiton_summary_resp %>% filter(responder_status_delta == 'responder') %>% filter(primsec_conj == 'Secondary Conjugated') %>% pull(log2_fc),
+            log2fc_conjugaiton_summary_resp %>% filter(responder_status_delta == 'nonresponder') %>% filter(primsec_conj == 'Secondary Conjugated') %>% pull(log2_fc))
+            
+```
+
+
+#### Conjugation fraction
+
+```{r }
+conjugation_ratios_resp = conjugation_ratios %>%
+ filter(!is.na(responder_status_delta)) %>% 
+  ungroup() %>%
+  filter(ratio < mean(ratio)+3*sd(ratio))
+
+ggplot(conjugation_ratios_resp, aes(x=timepoint, y=ratio*100, fill=factor(responder_status_delta))) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_point(pch=21, position=position_jitterdodge(), size=1.5) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=330, hjust=0),
+        legend.position='bottom') +
+  ylab('Percent of bile acid pool that is conjugated (%)') +
+  xlab('Timepoint') +
+  scale_fill_brewer(palette='Set1') +
+  scale_color_brewer(palette='Set1') +
+  guides(fill=guide_legend(title="Treatment Group"))
+
+
+wilcox.test(conjugation_ratios_resp %>% filter(timepoint == 'Week 3') %>% filter(responder_status_delta == 'responder') %>% pull(ratio),
+            conjugation_ratios_resp %>% filter(timepoint == 'Week 3') %>% filter(responder_status_delta == 'nonresponder') %>% pull(ratio))
+```
+
+
+
+
+## PCA 
+
+```{r pca}
+library(ggfortify)
+library(MASS)
+library(tidyverse)
+df <- iris[1:4]
+pca_res <- prcomp(df, scale. = TRUE)
+
+autoplot(pca_res)
+
+problem_samples = c('RAMP94', 'RAMP104', 'RAMP24', 'RAMP86', 'RAMP102', 'RAMP92', 'RAMP4', 'RAMP50')
+
+bile_data_spread = targeted_bile_results_with_meta %>% 
+  filter(timepoint == '3') %>%
+  # filter(!sample_id %in% problem_samples) %>%
+  select(sample_id, analyte, measured_conc, final_grp, responder_status_delta, bifido_abund_3, EDTA_plasma) %>% 
+  #filter(!is.na(responder_status_delta)) %>%
+  spread(key='analyte', value='measured_conc', fill=0.25) %>%
+  column_to_rownames(var='sample_id') 
+  
+pca_res =  prcomp(bile_data_spread[5:19], scale. = TRUE)
+autoplot(pca_res, data= bile_data_spread, colour = 'EDTA_plasma', loadings=T, loadings.label=T, loadings.label.size=2)
+
+ggplot(bile_data_spread, aes(x=EDTA_plasma, y=`Tauroursodeoxycholic Acid`)) +
+  geom_point() +
+  stat_smooth(method='lm')
+
+summary(lm(`Tauroursodeoxycholic Acid` ~ EDTA_plasma, data=bile_data_spread))
+```
+
+
+## Microbiome correlations
+
+### Week 3 comparions 
+
+```{r }
+ramp_ps_trim_genus_glom = readRDS('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/phyloseq_object_trimmed_genus_glom.rds')
+
+# Assuming `phyloseq_object` is your phyloseq object and `bile_acid_df` is your bile acid data frame
+# Extract the OTU (taxa) abundance data from the phyloseq object
+metadata_df <- as.data.frame(as(sample_data(ramp_ps_trim_genus_glom), "matrix")) %>% 
+  rownames_to_column(var='sample_id') %>% 
+  select(sample_id, participant_id, timepoint)
+
+# Merge metadata with microbial abundance and bile acid data
+microbial_abundance_df <- as.data.frame(as(otu_table(ramp_ps_trim_genus_glom), "matrix")) %>%
+  rownames_to_column("sample_id") %>%
+  left_join(metadata_df, by = "sample_id") %>%
+  filter(timepoint == '3') %>%
+  select(-c(sample_id, timepoint)) %>%
+  column_to_rownames(var='participant_id')
+
+bile_acid_df = targeted_bile_results_with_meta %>% 
+  filter(timepoint == 'Week 3') %>%
+  select(participant_id, analyte, measured_conc) %>%
+  spread(key='analyte', value='measured_conc') %>% 
+  column_to_rownames(var='participant_id')
+
+# Ensure that samples in both datasets match by sample names
+common_samples <- intersect(rownames(microbial_abundance_df), rownames(bile_acid_df))
+microbial_abundance_df <- microbial_abundance_df[common_samples, ]
+bile_acid_df <- bile_acid_df[common_samples, ]
+
+# Initialize matrices to store correlation coefficients and p-values
+cor_matrix <- matrix(NA, nrow = ncol(microbial_abundance_df), ncol = ncol(bile_acid_df))
+p_matrix <- matrix(NA, nrow = ncol(microbial_abundance_df), ncol = ncol(bile_acid_df))
+
+# Perform pairwise correlation and significance testing
+for (i in 1:ncol(microbial_abundance_df)) {
+  for (j in 1:ncol(bile_acid_df)) {
+    cor_test <- cor.test(microbial_abundance_df[, i], bile_acid_df[, j], method = "pearson")
+    cor_matrix[i, j] <- cor_test$estimate
+    p_matrix[i, j] <- cor_test$p.value
+  }
+}
+
+# Adjust p-values using the Benjamini-Hochberg method
+p_adjusted <- p.adjust(p_matrix, method = "BH")
+
+p_adjusted_matrix = matrix(p_adjusted, nrow = ncol(microbial_abundance_df), ncol = ncol(bile_acid_df))
+
+# Set row and column names of the matrices for clarity
+rownames(cor_matrix) <- colnames(microbial_abundance_df)
+colnames(cor_matrix) <- colnames(bile_acid_df)
+rownames(p_matrix) <- colnames(microbial_abundance_df)
+colnames(p_matrix) <- colnames(bile_acid_df)
+rownames(p_adjusted_matrix) <- colnames(microbial_abundance_df)
+colnames(p_adjusted_matrix) <- colnames(bile_acid_df)
+
+# Create a logical matrix indicating statistically significant correlations (e.g., p < 0.05)
+significant_matrix <- matrix(p_adjusted < 0.05, nrow = ncol(microbial_abundance_df), ncol = ncol(bile_acid_df))
+rownames(significant_matrix) <- colnames(microbial_abundance_df)
+colnames(significant_matrix) <- colnames(bile_acid_df)
+
+border_matrix <- matrix(NA, nrow = nrow(significant_matrix), ncol = ncol(significant_matrix))
+
+# Set border color for significant cells (e.g., black border)
+border_matrix[significant_matrix] <- "green"
+
+library(pheatmap)
+library(viridis)
+# Heatmap of correlation coefficients
+pheatmap(cor_matrix, cluster_rows = T, cluster_cols = T, 
+         border_color = border_matrix,
+         cellheight=5, cellwidth = 15,
+         display_numbers = significant_matrix, # Display significance on heatmap
+         fontsize = 4,
+         main = "Correlation Heatmap of Microbial Taxa and Bile Acids",
+         color =colorRampPalette(c("blue", "white", "red"))(50))
+
+tax_table_otu = as.data.frame(as(tax_table(ramp_ps_trim_genus_glom), "matrix")) %>%
+  rownames_to_column(var='OTU')
+
+# Cluster rows (microbial taxa)
+row_clustering <- hclust(dist(cor_matrix))
+row_order <- row_clustering$order  # Get the order of rows
+
+# Cluster columns (bile acids)
+col_clustering <- hclust(dist(t(cor_matrix)))
+col_order <- col_clustering$order  # Get the order of columns
+
+# Convert matrices to a data frame in long format
+cor_df <- as.data.frame(as.table(cor_matrix))  # Long format for correlations
+p_df <- as.data.frame(as.table(p_adjusted_matrix))    # Long format for p-values
+
+
+# Merge the correlation and p-value data frames
+plot_df <- cor_df %>%
+  rename(Microbial_Taxon = Var1, Bile_Acid = Var2, Correlation = Freq) %>%
+  left_join(p_df %>% rename(Microbial_Taxon = Var1, Bile_Acid = Var2, P_Value = Freq), 
+            by = c("Microbial_Taxon", "Bile_Acid")) %>%
+  left_join(tax_table_otu, by=c('Microbial_Taxon'='OTU'))
+
+
+
+
+
+# Step 3: Reorder rows and columns based on clustering
+# Convert the factor levels of Microbial_Taxon and Bile_Acid to reflect the cluster ordering
+plot_df$Microbial_Taxon <- factor(plot_df$Microbial_Taxon, levels = rownames(cor_matrix)[row_order])
+plot_df$Bile_Acid <- factor(plot_df$Bile_Acid, levels = colnames(cor_matrix)[col_order])
+
+taxon_order <- plot_df %>%
+  arrange(Microbial_Taxon) %>%  # Ensure `Microbial_Taxon` is ordered by clustering
+  select(Microbial_Taxon, Genus) %>%
+  distinct(Genus, .keep_all = TRUE)
+
+plot_df$Genus <- factor(plot_df$Genus, levels = taxon_order$Genus)
+
+# Create the bubble plot using ggplot2
+bile_otu_bubble_plot = ggplot(plot_df, aes(x = Bile_Acid, y = Genus, size = -log10(P_Value), color = Correlation)) +
+  geom_point() +
+  scale_size_continuous(range = c(1, 5), name = "Significance (-log10 P)") +
+  scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, name = "Correlation") +
+  theme_minimal() +
+  labs(x = "Bile Acid",
+       y = "Microbial Taxon") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=5),
+        axis.text.y = element_text(size=5))  # Rotate x-axis labels for better readability
+
+ggsave(filename = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/bile_otu_bubble_plot.pdf',
+       plot = bile_otu_bubble_plot,
+       width=6, height=5)
+
+p_df %>% arrange(Freq) %>%
+  left_join(tax_table_otu, by=c('Var1'='OTU')) %>%
+  select(Genus, Var2, Freq) %>%
+  filter(Freq < 0.05)
+```
+
+```{r }
+significant_pairs <- which(significant_matrix, arr.ind = TRUE)
+# Create a list to store the plots
+plots_list <- list()
+
+# Loop through each significant pair and create scatterplots
+for (k in 1:nrow(significant_pairs)) {
+  # Get the row (microbial taxon) and column (bile acid) indices
+  microbial_index <- significant_pairs[k, 1]
+  bile_acid_index <- significant_pairs[k, 2]
+  
+  # Get the microbial taxon and bile acid names
+  microbial_taxon <- colnames(microbial_abundance_df)[microbial_index]
+  bile_acid <- colnames(bile_acid_df)[bile_acid_index]
+  
+  # Prepare the raw data for plotting
+  raw_data <- data.frame(
+    Microbial_Abund = microbial_abundance_df[, microbial_index],
+    Bile_Acid_Abund = bile_acid_df[, bile_acid_index]
+  )
+  
+  # Create the scatterplot
+  plot <- ggplot(raw_data, aes(x = Microbial_Abund, y = Bile_Acid_Abund)) +
+    geom_point() +
+    geom_smooth(method = "lm", se = FALSE, color = "red") +
+    labs(title = paste(microbial_taxon, "vs", bile_acid),
+         x = paste("Fold Change in", microbial_taxon),
+         y = paste("Fold Change in", bile_acid)) +
+    theme_minimal()
+  
+  # Add the plot to the list
+  plots_list[[k]] <- plot
+}
+
+# Display all the plots
+# You can use gridExtra or patchwork to arrange multiple ggplot plots if needed
+library(gridExtra)
+do.call(grid.arrange, c(plots_list, ncol = 2))  # Adjust ncol as needed
+```
+
+
+### Fold-change comparisons
+```{r }
+# Load necessary libraries
+library(phyloseq)
+library(tidyverse)
+library(pheatmap)
+library(compositions)  # For CLR transformation
+
+# Assuming `phyloseq_object` is your phyloseq object and `bile_acid_df` is your bile acid data frame
+# Extract the OTU (taxa) abundance data from the phyloseq object
+microbial_abundance <- as(otu_table(ramp_ps_trim_genus_glom), "matrix")
+
+# You must have a metadata file that contains the information about individuals and sample times (baseline and end)
+# Assuming `metadata_df` contains columns: "SampleID", "PersonID", "Timepoint" (where Timepoint is 'baseline' or 'end')
+# Make sure metadata matches the sample IDs
+metadata_df <- as(sample_data(ramp_ps_trim_genus_glom), 'matrix') %>% 
+  as.data.frame() %>%
+  rownames_to_column(var='SampleID') %>%
+  # filter(treatment_grp == '91') %>%
+  select(SampleID, participant_id, timepoint)
+
+# Merge metadata with microbial abundance and bile acid data
+microbial_abundance_fc_df <- as.data.frame(microbial_abundance) %>%
+  rownames_to_column("SampleID") %>%
+  left_join(metadata_df, by = "SampleID") %>%
+  select(-c(SampleID)) %>%
+  gather(key='OTU', value='count', -participant_id, -timepoint) %>%
+  mutate(count = log10(count+1)) %>%
+  filter(timepoint %in% c('2', '3')) %>%
+  spread(key='timepoint', value='count', fill=0.) %>%
+  mutate(fold_change = log2((`3`+1)/(`2`+1))) %>%
+  select(participant_id, OTU, fold_change) %>%
+  spread(key='OTU', value='fold_change') %>%
+  column_to_rownames(var='participant_id') %>%
+  scale()
+
+bile_acid_fc_df = targeted_bile_results_with_meta %>% 
+  select(participant_id, timepoint, analyte, corrected_conc) %>%
+  spread(key='timepoint', value='corrected_conc', fill=0.25) %>% 
+  mutate(fold_change = log2(`Week 3`/`Week 0`)) %>%
+  # filter(analyte == 'Tauroursodeoxycholic Acid')
+  select(participant_id, analyte, fold_change) %>%
+  spread(key='analyte', value='fold_change', fill=0.) %>%
+  column_to_rownames(var='participant_id') %>%
+  scale()
+
+# Ensure that samples in both datasets match by sample names
+common_samples <- intersect(rownames(microbial_abundance_fc_df), rownames(bile_acid_fc_df))
+microbial_abundance_fc_df <- microbial_abundance_fc_df[common_samples, ]
+bile_acid_fc_df <- bile_acid_fc_df[common_samples, ]
+
+# Initialize matrices to store correlation coefficients and p-values
+cor_matrix <- matrix(NA, nrow = ncol(microbial_abundance_fc_df), ncol = ncol(bile_acid_fc_df))
+p_matrix <- matrix(NA, nrow = ncol(microbial_abundance_fc_df), ncol = ncol(bile_acid_fc_df))
+
+# Perform pairwise correlation and significance testing
+for (i in 1:ncol(microbial_abundance_fc_df)) {
+  for (j in 1:ncol(bile_acid_fc_df)) {
+    cor_test <- cor.test(microbial_abundance_fc_df[, i], bile_acid_fc_df[, j], method = "pearson")
+    cor_matrix[i, j] <- cor_test$estimate
+    p_matrix[i, j] <- cor_test$p.value
+  }
+}
+
+# Adjust p-values using the Benjamini-Hochberg method
+p_adjusted <- p.adjust(p_matrix, method = "none")
+
+# Set row and column names of the matrices for clarity
+rownames(cor_matrix) <- colnames(microbial_abundance_fc_df)
+colnames(cor_matrix) <- colnames(bile_acid_fc_df)
+rownames(p_matrix) <- colnames(microbial_abundance_fc_df)
+colnames(p_matrix) <- colnames(bile_acid_fc_df)
+
+# Create a logical matrix indicating statistically significant correlations (e.g., p < 0.05)
+significant_matrix <- matrix(p_adjusted < 0.05, nrow = ncol(microbial_abundance_fc_df), ncol = ncol(bile_acid_fc_df))
+rownames(significant_matrix) <- colnames(microbial_abundance_fc_df)
+colnames(significant_matrix) <- colnames(bile_acid_fc_df)
+
+border_matrix <- matrix(NA, nrow = nrow(significant_matrix), ncol = ncol(significant_matrix))
+
+# Set border color for significant cells (e.g., black border)
+border_matrix[significant_matrix] <- "green"
+
+# Heatmap of correlation coefficients
+pheatmap(cor_matrix, cluster_rows = TRUE, cluster_cols = TRUE, 
+         cellheight=5, cellwidth = 15,
+         border_color = border_matrix,
+         display_numbers = significant_matrix, # Display significance on heatmap
+         fontsize = 4,
+         main = "Correlation Heatmap of Microbial Taxa and Bile Acids",
+         color =colorRampPalette(c("blue", "white", "red"))(50))
+```
+
+```{r }
+significant_pairs <- which(significant_matrix, arr.ind = TRUE)[1:5, ]
+# Create a list to store the plots
+plots_list <- list()
+
+# Loop through each significant pair and create scatterplots
+for (k in 1:nrow(significant_pairs)) {
+  # Get the row (microbial taxon) and column (bile acid) indices
+  microbial_index <- significant_pairs[k, 1]
+  bile_acid_index <- significant_pairs[k, 2]
+  
+  # Get the microbial taxon and bile acid names
+  microbial_taxon <- colnames(microbial_abundance_fc_df)[microbial_index]
+  bile_acid <- colnames(bile_acid_fc_df)[bile_acid_index]
+  
+  # Prepare the raw data for plotting
+  raw_data <- data.frame(
+    Microbial_Abund = microbial_abundance_fc_df[, microbial_index],
+    Bile_Acid_Abund = bile_acid_fc_df[, bile_acid_index]
+  )
+  
+  # Create the scatterplot
+  plot <- ggplot(raw_data, aes(x = Microbial_Abund, y = Bile_Acid_Abund)) +
+    geom_point() +
+    geom_smooth(method = "lm", se = FALSE, color = "red") +
+    labs(title = paste(microbial_taxon, "vs", bile_acid),
+         x = paste("Fold Change in", microbial_taxon),
+         y = paste("Fold Change in", bile_acid)) +
+    theme_minimal()
+  
+  # Add the plot to the list
+  plots_list[[k]] <- plot
+}
+
+# Display all the plots
+# You can use gridExtra or patchwork to arrange multiple ggplot plots if needed
+library(gridExtra)
+do.call(grid.arrange, c(plots_list, ncol = 2))  # Adjust ncol as needed
+```
+

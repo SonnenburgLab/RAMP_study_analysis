@@ -285,9 +285,8 @@ combined_diet_with_scfa_data %>%
   spread(key='acid', value='concentration')
 
 
-
-scfa_maaslin_meta_df = combined_diet_with_scfa_data %>%
-  select(sample, participant_id, stool_count, final_grp, age, gender, responder_status_delta, EDTA_plasma, 40:52) %>%
+scfa_meta_df = combined_diet_with_scfa_data %>%
+  dplyr::select(sample, participant_id, stool_count, final_grp, age, gender, responder_status_delta, EDTA_plasma, 41:53) %>%
   distinct() %>%
   mutate(final_grp = factor(final_grp, levels=c('Placebo', 'Low Dose 2FL', 'High Dose 2FL'))) %>%
   column_to_rownames(var='sample') %>%
@@ -314,69 +313,85 @@ scfa_maaslin_meta_df = combined_diet_with_scfa_data %>%
   responder_mod = ifelse(responder_status_delta == 'responder', 1, 0),
   time_responder = responder_mod * stool_count) 
 
+scfa_abundance_df = combined_diet_with_scfa_data %>% 
+  select(sample, acid, concentration_adj) %>% 
+  spread(key='acid', value='concentration_adj') %>%
+  column_to_rownames(var='sample')
+
 scfa_abundance_df_filtered = scfa_abundance_df[row.names(scfa_maaslin_meta_df), ] %>%
   # mutate(total_of_3 = acetate + propionate + butyrate) %>%
   # select(acetate, propionate, butyrate, total_of_3) %>%
   # scale() %>%
   as.data.frame()
+```
 
-mas_scfa <- Maaslin2(
-  input_data = scfa_abundance_df_filtered,
-  input_metadata = scfa_maaslin_meta_df,
-  output = "/home/mmcarter/user_data/Projects/RAMP/SCFA/MAASLIN",
-  min_abundance = 0.0,
-  min_prevalence = 0.0,
-  normalization = "NONE",
-  transform = "NONE",
-  analysis_method = "LM",
-  max_significance = 0.05,
-  fixed_effects = c("energy"),
-  random_effects = c("participant_id"),
-  #reference = c('final_grp,Placebo'),
-  correction = "BH",
-  standardize = FALSE,
-  cores = 1)
 
-acetate_energy_corr_plot = ggplot(combined_diet_with_scfa_data %>% filter(acid == 'acetate'), aes(x=`Energy (kcal)`, y=concentration)) +
-  geom_point() +
-  stat_smooth(method='lm')+
-  theme_bw() +
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank())
-ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/scfa_acetate_energy_corr.pdf',
-       plot = acetate_energy_corr_plot,
-       width=3,height=3)
+```{r scfa_diet_heatmap}
+diet_abundance_df = scfa_meta_df %>%
+  select(energy, carbs, fiber, protein, fat) %>%
+  filter(!is.na(energy))
 
-propionate_energy_corr_plot = ggplot(combined_diet_with_scfa_data %>% filter(acid == 'propionate'), aes(x=`Energy (kcal)`, y=concentration)) +
-  geom_point() +
-  stat_smooth(method='lm') +
-  theme_bw() +
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank())
-ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/scfa_propionate_energy_corr.pdf',
-       plot = propionate_energy_corr_plot,
-       width=3,height=3)
+# Ensure that samples in both datasets match by sample names
+common_samples <- intersect(rownames(diet_abundance_df), rownames(scfa_abundance_df))
+diet_abundance_df_filt <- diet_abundance_df[common_samples, ]
+scfa_abundance_df_filt <- scfa_abundance_df[common_samples, ]
 
-butyrate_energy_corr_plot = ggplot(combined_diet_with_scfa_data %>% filter(acid == 'butyrate'), aes(x=`Energy (kcal)`, y=concentration)) +
-  geom_point() +
-  stat_smooth(method='lm') +
-  theme_bw() +
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank())
-ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/scfa_butyrate_energy_corr.pdf',
-       plot = butyrate_energy_corr_plot,
-       width=3,height=3)
+# Initialize matrices to store correlation coefficients and p-values
+cor_matrix <- matrix(NA, nrow = ncol(diet_abundance_df_filt), ncol = ncol(scfa_abundance_df_filt))
+p_matrix <- matrix(NA, nrow = ncol(diet_abundance_df_filt), ncol = ncol(scfa_abundance_df_filt))
 
-hexanoate_energy_corr_plot = ggplot(combined_diet_with_scfa_data %>% filter(acid == 'hexanoate'), aes(x=`Energy (kcal)`, y=concentration)) +
-  geom_point() +
-  stat_smooth(method='lm')+
-  theme_bw() +
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank())
-ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/scfa_hexanoate_energy_corr.pdf',
-       plot = hexanoate_energy_corr_plot,
-       width=3,height=3)
+# Perform pairwise correlation and significance testing
+for (i in 1:ncol(diet_abundance_df_filt)) {
+  for (j in 1:ncol(scfa_abundance_df_filt)) {
+    cor_test <- cor.test(diet_abundance_df_filt[, i], scfa_abundance_df_filt[, j], method = "spearman")
+    cor_matrix[i, j] <- cor_test$estimate
+    p_matrix[i, j] <- cor_test$p.value
+  }
+}
 
+# Adjust p-values using the Benjamini-Hochberg method
+p_adjusted <- p.adjust(p_matrix, method = "BH")
+p_adjusted_matrix = matrix(p_adjusted, nrow = ncol(diet_abundance_df_filt), ncol = ncol(scfa_abundance_df_filt))
+
+# Set row and column names of the matrices for clarity
+rownames(cor_matrix) <- colnames(diet_abundance_df_filt)
+colnames(cor_matrix) <- colnames(scfa_abundance_df_filt)
+rownames(p_matrix) <- colnames(diet_abundance_df_filt)
+colnames(p_matrix) <- colnames(scfa_abundance_df_filt)
+rownames(p_adjusted_matrix) <- colnames(diet_abundance_df_filt)
+colnames(p_adjusted_matrix) <- colnames(scfa_abundance_df_filt)
+
+# Create a logical matrix indicating statistically significant correlations (e.g., p < 0.05)
+significant_matrix <- matrix(p_adjusted < 0.05, nrow = ncol(diet_abundance_df_filt), ncol = ncol(scfa_abundance_df_filt))
+rownames(significant_matrix) <- colnames(diet_abundance_df_filt)
+colnames(significant_matrix) <- colnames(scfa_abundance_df_filt)
+
+# Convert matrices to a data frame in long format
+cor_df <- as.data.frame(as.table(cor_matrix))  # Long format for correlations
+p_df <- as.data.frame(as.table(p_adjusted_matrix))    # Long format for p-values
+
+# Merge the correlation and p-value data frames
+plot_df <- cor_df %>%
+  rename(Diet_Component = Var1, SCFA = Var2, Correlation = Freq) %>%
+  left_join(p_df %>% rename(Diet_Component = Var1, SCFA = Var2, P_Value = Freq), 
+            by = c("Diet_Component", "SCFA")) %>%
+  mutate(threshold = ifelse(P_Value <= 0.05, T, F)) %>%
+  filter(SCFA != '4-methylpentanoate')
+
+# Create the bubble plot using ggplot2
+scfa_diet_bubble_plot = ggplot(plot_df, ) +
+  geom_point(aes(x = Diet_Component, y = SCFA, size = -log10(P_Value), fill = Correlation, color=threshold), pch=21, stroke=1) +
+  scale_size_continuous(range = c(2, 10), name = "Significance (-log10 P)") +
+  scale_color_manual(values=c('#ffffff', '#2c3e50')) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0, name = "Correlation") +
+  theme_minimal() +
+  labs(x = "Macronutrient",
+       y = "SCFA") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/scfa_diet_bubble_plot.pdf',
+       plot = scfa_diet_bubble_plot,
+       width=5,height=4)
 ```
 
 
@@ -388,7 +403,6 @@ scfa_diet_data = scfa_abundance_df_filtered %>%
   mutate(timepoint = as.character(stool_count))
 
 ps_maaslin = readRDS('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/phyloseq_object_for_maaslin.rds')
-tax_table(ps_maaslin)
 
 ramp_ps_trim_genus_glom = readRDS('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/phyloseq_object_trimmed_genus_glom.rds')
 
@@ -439,8 +453,6 @@ mas_fiber_microbe <- Maaslin2(
   correction = "BH",
   standardize = TRUE,
   cores = 1)
-
-tax_table(ps_maaslin)
 
 ```
 
@@ -589,47 +601,3 @@ ggsave('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/plots/scfa_mi
 ```
 
 
-
-```{r}
-summary(lm(concentration_adj ~ `Carbs (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
-summary(lm(concentration_adj ~ `Carbs (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'propionate')))
-summary(lm(concentration_adj ~ `Carbs (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'butyrate')))
-
-
-summary(lm(concentration_adj ~ `Fiber (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
-summary(lm(concentration_adj ~ `Fiber (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'propionate')))
-summary(lm(concentration_adj ~ `Fiber (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'butyrate')))
-
-summary(lm(concentration ~ `Starch (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
-summary(lm(concentration ~ `Starch (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'propionate')))
-summary(lm(concentration ~ `Starch (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'butyrate')))
-
-summary(lm(concentration ~ `Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
-summary(lm(concentration ~ `Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'propionate')))
-summary(lm(concentration ~ `Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'butyrate')))
-
-summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
-summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'propionate')))
-summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'butyrate')))
-summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == '2-methylbutyric')))
-summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == '3-methylbutyric')))
-summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == '2-methylpropionate')))
-summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'pentanoate')))
-summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'hexanoate')))
-summary(lm(concentration ~ `Carbs (g)`+`Fiber (g)`+`Starch (g)`+`Protein (g)`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == '4-methylpentanoate')))
-
-
-summary(lm(concentration ~ `sum_bcaa`+final_grp+timepoint, combined_diet_with_scfa_data %>% filter(acid == 'acetate')))
-
-```
-
-
-```{r }
-# install.packages('statip')
-
-library(statip)
-x <- rnorm(200, 0, 2)
-y <- rnorm(1000, 15, 10)
-hellinger(x, y, -Inf, Inf)
-hellinger(x, y, -Inf, Inf, method = 2)
-```
