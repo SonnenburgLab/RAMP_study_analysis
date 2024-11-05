@@ -11,6 +11,8 @@ library(impute)
 ```
 
 
+## Load metadata
+
 ```{r load_metadata}
 
 bifido_responders = read_csv('/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S/16S_bifido_responder_status.csv') %>%
@@ -46,6 +48,7 @@ serum_manifest = read_csv('/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/M
 ```
 
 
+## Load mbx raw data
 
 ```{r load_mbx_data}
 plate_map = read_csv('/home/mmcarter/user_data/Projects/RAMP/METABOLOMICS/MAP_TABLES/Serum_Metabolomics_Plate_Map.csv', col_names = T) %>%
@@ -172,6 +175,8 @@ c18positive_gathered_combined_cleaned = c18positive_gathered_combined %>%
   select(participant_timepoint, everything(), -c(participant_id, timepoint, qtof_sample_name)) 
 ```
 
+## Write data tables
+
 ```{r write_df}
 c18positive_gathered_combined_cleaned_impute = final_participant_timepoint %>%
   left_join(c18positive_gathered_combined_cleaned) %>%
@@ -215,6 +220,7 @@ fold_change_metabolite_by_participant = metabolomics_cleaned %>%
   mutate(logFC = log2(`4`)-log2(`2`+1))
 ```
 
+## Perform QC steps
 
 ```{r run_qc}
 all_sample_tic = c18positive_gathered_combined %>%
@@ -263,6 +269,8 @@ ggplot(individual_istd_tic, aes(x=peak_area, fill=Plate)) +
   facet_wrap(~inchikey, scales='free')
 
 ```
+
+## Prep Maaslin analysis
 
 
 ```{r maaslin_mbx}
@@ -339,7 +347,7 @@ mbx_meta_rnr_df = mbx_meta_df %>%
 
 ```
 
-
+## Run Maaslin 
 
 ```{r grp_compare_maaslin}
 
@@ -364,14 +372,11 @@ all_groups_mas_metabolomics_grp$results %>%
   filter(value == 'phase_grp') %>%
   arrange(qval, pval)
 
-metabolite_map %>% 
-  filter(metabolite_name == 'm_c18p_0115')
 
 ```
 
 
-
-## Individual metabolites
+## Inspect individual metabolites
 
 ```{r indiv_metabs}
 mbx_plot_df = mbx_abund_matrix_filtered %>% 
@@ -458,6 +463,8 @@ wilcox.test(log10(mbx_plot_df %>% filter(metabolite == 'm_c18p_0098') %>% filter
 
 ```
 
+## Responder/Non-responder analysis
+
 ```{r r_vs_nr_maaslin}
 
 mas_metabolomics_rnr <- Maaslin2(
@@ -517,6 +524,45 @@ ggplot(merged_mbx_df, aes(x=phase, y=m_c18p_0447, group=phase)) +
 metabolite_map %>% 
   filter(metabolite_name %in% (mas_metabolomics_rnr$results %>% filter(metadata == 'phase_responder_grp') %>% filter(qval < 0.1) %>% pull(feature)))
 ```
+
+## Write supp table
+
+```{r }
+treatment_group_mbx_results = all_groups_mas_metabolomics_grp$results %>%
+  filter(value == 'phase_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval) %>%
+  select(feature, coef, stderr, pval, qval) %>%
+  rename(coef.treatment_group = 2,
+         stderr.treatment_group = 3,
+         pval.treatment_group = 4,
+         qval.treatment_group = 5)
+
+
+ responder_group_mbx_results = mas_metabolomics_rnr$results %>%
+  filter(metadata == 'phase_responder_grp') %>%
+  mutate(qval = p.adjust(pval, method='BH')) %>%
+  arrange(qval, pval) %>%
+  select(feature, coef, stderr, pval, qval) %>%
+  rename(coef.responder_group = 2,
+         stderr.responder_group = 3,
+         pval.responder_group = 4,
+         qval.responder_group = 5)
+ 
+joined_mbx_results = left_join(treatment_group_mbx_results, responder_group_mbx_results) %>% 
+  left_join(metabolite_map, by=c('feature'='metabolite_name')) %>%
+  select(-c(feature)) %>%
+  rename(feature = inchikey) %>%
+  select(feature, everything())
+
+write.table(joined_mbx_results,
+          file = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/METABOLOMICS/metabolomics_regression_results.tsv',
+          sep = '\t',
+          quote = F)
+```
+
+
+## Sensitivity analysis
 
 ```{r shuffle}
 mbx_num_hits = c()

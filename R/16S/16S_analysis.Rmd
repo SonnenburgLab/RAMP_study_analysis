@@ -299,6 +299,25 @@ ps_rel_ab <- transform_sample_counts(ps_trim, function(x) x / sum(x))
 
 ```
 
+### Write tables
+
+```{r write_tables}
+phyloseq_write_path = '/home/mmcarter/user_data/Projects/RAMP/RAMP_study_analysis/data/16S'
+
+
+write.csv(as.data.frame(otu_table(ps_trim)),
+          file = paste(phyloseq_write_path, 'ramp_phyloseq_object_otu.csv', sep='/'),
+          quote = F)
+write.csv(as.data.frame(sample_data(ps_trim)),
+          file = paste(phyloseq_write_path, 'ramp_phyloseq_object_samples.csv', sep='/'),
+          quote = F)
+write.csv(as.data.frame(tax_table(ps_trim)),
+          file = paste(phyloseq_write_path, 'ramp_phyloseq_object_taxonomy.csv', sep='/'),
+          quote = F)
+
+```
+
+
 ### Rarefy phyloseq object
 
 ```{r rarefy}
@@ -864,8 +883,6 @@ bifido_present_at_base = bifido_responders %>%
 
 chi_square_result <- chisq.test(bifido_present_at_base)  
 ```
-
-
 
 
 ```{r bifido_v_plasma}
